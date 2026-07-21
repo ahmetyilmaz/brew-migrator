@@ -1,9 +1,18 @@
+"""Spectacular TUI layer built on rich + questionary + alive-progress.
+
+This module is the primary user-facing surface. It keeps backwards-compatible
+shims for the original retro API referenced from core/* (history.py, brew.py).
+"""
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import sys
 import time
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
@@ -19,6 +28,7 @@ from rich.box import (
     SIMPLE_HEAD,
     SQUARE,
     DOUBLE,
+    ROUNDED,
 )
 
 try:
@@ -27,7 +37,13 @@ except Exception:  # pragma: no cover
     questionary = None
 
 _APPLICATIONS_FOLDER = "/Applications"
+HISTORY_PATH = Path.home() / ".brew_migrator_history"
+PLAN_PATH = Path.home() / ".brew_migrator_plan.json"
 
+
+# ---------------------------------------------------------------------------
+# Color / output helpers
+# ---------------------------------------------------------------------------
 
 def _use_colors() -> bool:
     if os.environ.get("NO_COLOR") == "1" or os.environ.get("NO_ANSI") == "1":
@@ -40,16 +56,20 @@ def _use_colors() -> bool:
 console = Console(force_terminal=_use_colors(), color_system="standard")
 err_console = Console(stderr=True, force_terminal=_use_colors(), color_system="standard")
 
-
-# Backwards-compatible shims for the original retro API still referenced
-# from core/* (history.py, brew.py). The new rich/questionary UI is the
-# primary surface, but these names are kept so core helpers don't break
-# when a history file fails to load or a brew command raises.
+BRAND = "bold cyan"
+GOOD = "bold green"
+WARN = "bold yellow"
+BAD = "bold red"
+MUTED = "dim"
 RED = "bold red"
 
 
+def _t(text: str) -> Text:
+    return Text.from_markup(text)
+
+
 def retro_print(text: str, style: str = "", err: bool = True) -> None:
-    """Minimal retro-style print used by core/* for warnings/errors."""
+    """Compatibility shim for core/*."""
     target = err_console if err else console
     if not _use_colors():
         target.print(text)
@@ -62,9 +82,7 @@ def retro_print(text: str, style: str = "", err: bool = True) -> None:
 
 
 class ProgressBar:
-    """Tiny context manager that prints a start/finish line. Replaces the
-    original progress indicator used by the brew install path.
-    """
+    """Compatibility shim used by core/brew.py."""
 
     def __init__(self, label: str) -> None:
         self.label = label
@@ -78,16 +96,6 @@ class ProgressBar:
             console.print(f"[bold green]done[/bold green] {self.label}")
         else:
             console.print(f"[bold red]failed[/bold red] {self.label}")
-
-BRAND = "bold cyan"
-GOOD = "bold green"
-WARN = "bold yellow"
-BAD = "bold red"
-MUTED = "dim"
-
-
-def _t(text: str) -> Text:
-    return Text.from_markup(text)
 
 
 def boot_spinner(label: str = "Brew Migrator", duration: float = 0.6) -> None:
@@ -107,9 +115,12 @@ def boot_spinner(label: str = "Brew Migrator", duration: float = 0.6) -> None:
 
 
 def clear_screen() -> None:
-    # Safe: no user input reaches this call.
     os.system("cls" if os.name == "nt" else "clear")
 
+
+# ---------------------------------------------------------------------------
+# Rich panels / tables
+# ---------------------------------------------------------------------------
 
 def title_block(version: str = "v0.0.3") -> Panel:
     body = Text.assemble(
@@ -120,65 +131,35 @@ def title_block(version: str = "v0.0.3") -> Panel:
         ("→ ", "dim"),
         ("Homebrew Cask ", "bold cyan"),
         ("× ", ""),
-        ("Charm UI ", "bold magenta"),
+        ("Charm TUI ", "bold magenta"),
     )
     return Panel(
         Align.center(body, vertical="middle"),
         title=_t("[bold cyan]BREW MIGRATOR[/bold cyan]"),
-        subtitle=_t("[dim]charm.land-inspired terminal experience[/dim]"),
+        subtitle=_t("[dim]scan → match → select → install[/dim]"),
         border_style="cyan",
         box=HEAVY_EDGE,
         padding=(0, 3),
     )
 
 
-def flow_badge(step: int) -> Panel:
-    lines = [
-        _build_step(0, step, "Scan", ":satellite: Reading /Applications"),
-        _build_step(1, step, "Match", ":mag_right: Finding Cask candidates"),
-        _build_step(2, step, "Rank", ":chart_increasing: Scoring + official-tap filter"),
-        _build_step(3, step, "Decide", ":ticket: Confirm, review, or skip each app"),
-        _build_step(4, step, "Finish", ":sparkles: Generate session summary"),
-    ]
-    body = "\n".join(lines)
-    return Panel(
-        Text.from_markup(body, style=BRAND),
-        title=_t("[bold white]Progress[/bold white]"),
-        border_style="blue",
-        box=MINIMAL,
-        padding=(0, 1),
-    )
-
-
-def _build_step(index: int, current: int, label: str, detail: str) -> str:
-    if index < current:
-        state = ":white_check_mark:"
-        style = GOOD
-    elif index == current:
-        state = ":star2:"
-        style = BRAND
-    else:
-        state = ":white_circle:"
-        style = MUTED
-    return f"{state} [{style}]{label}[/] [dim]{detail}[/dim]\n"
-
-
-def welcome_panel(app_count: int, history_count: int, ignore_count: int) -> Panel:
+def welcome_panel() -> Panel:
     md = "\n".join(
         [
-            "**Walkthrough**",
-            "1. **Scan** — reads `" + _APPLICATIONS_FOLDER + "` and lists apps left to process",
-            "2. **Match** — calls Homebrew, prefers `homebrew/cask` when available",
-            "3. **Decide** — choose the best match, preview the command, and confirm destructive actions",
-            f"4. **History** — remembers migrated/skipped/failed so reruns skip real apps automatically",
+            "Welcome to **Brew Migrator**.",
             "",
-            f"**This run** — apps: {app_count} · entries: {history_count + ignore_count}",
+            "- Scan **/Applications** for `.app` bundles",
+            "- Match every app to best Homebrew Casks",
+            "- Autoselect top matches, review in bulk, then install",
+            "- Browse history and retry failures",
+            "",
+            "*All paths are local. History is kept on disk.*",
         ]
     )
     return Panel(
         Markdown(md),
-        title=_t("[bold white]Welcome, friend.[/bold white]"),
-        subtitle=_t("[dim]You stayed on the safe path.[/dim]"),
+        title=_t("[bold white]Hi![/bold white]"),
+        subtitle=_t("[dim]this tool only works on macOS with Homebrew[/dim]"),
         border_style="magenta",
         box=DOUBLE,
         padding=(1, 2),
@@ -186,12 +167,6 @@ def welcome_panel(app_count: int, history_count: int, ignore_count: int) -> Pane
 
 
 def animated_boot(seconds: float = 0.8) -> None:
-    first = 0.4 * seconds
-    second = 0.35 * seconds
-    third = 0.1 * seconds
-    last = 0.15 * seconds
-    boot_spinner("Brew Migrator", duration=max(first, 0.3))
-
     with Progress(
         SpinnerColumn(),
         TextColumn("[bold yellow]{task.description}[/bold yellow]"),
@@ -199,23 +174,12 @@ def animated_boot(seconds: float = 0.8) -> None:
         console=console,
         transient=True,
     ) as progress:
-        task_id = progress.add_task("Preparing workspace", total=1)
-        time.sleep(first)
-        try:
-            progress.advance(task_id, 0.02)
-        except TypeError:  # compitible fallback for older rich APIs
-            progress.advance(task_id)
-        time.sleep(second)
-        try:
-            progress.advance(task_id, 0.05)
-        except TypeError:
-            progress.advance(task_id)
-        time.sleep(third)
-        try:
-            progress.advance(task_id, 0.93)
-        except TypeError:
-            progress.advance(task_id)
-        time.sleep(last)
+        task_id = progress.add_task("Loading workspace", total=1)
+        time.sleep(max(0.05, seconds * 0.35))
+        progress.advance(task_id)
+        time.sleep(max(0.05, seconds * 0.35))
+        progress.advance(task_id)
+        time.sleep(max(0.05, seconds * 0.35))
 
 
 def trust_banner(text: str, kind: str = "default") -> Panel:
@@ -254,6 +218,7 @@ def preview_panel(app: str, candidate: dict, force: bool = False, dry_run: bool 
                 f":house_with_garden: Official cask: [green]{official_md}[/green]",
                 f":construction_worker: Already installed: {'[green]yes[/green]' if installed else '[red]no[/red]'}",
                 f":shield: Force install: {'[red]yes[/red]' if force else '[green]no[/green]'}",
+                f":notebook: Dry run: {'[green]yes[/green]' if dry_run else '[red]no[/red]'}",
                 "",
                 f":computer: **Command**\n[cyan]{cmd}[/cyan]",
             ]
@@ -264,12 +229,15 @@ def preview_panel(app: str, candidate: dict, force: bool = False, dry_run: bool 
         title=_t("[bold white]Action preview[/bold white]"),
         subtitle=_t("[dim]Read carefully before confirming.[/dim]"),
         border_style="yellow",
-        box=HEAVY,
+        box=SQUARE,
         padding=(0, 2),
     )
 
 
 def confirmation_prompt(message: str, action: str = "Confirm", danger: bool = False) -> bool:
+    if questionary is None:
+        choice = input(f"{action}: {message} [y/N]: ").strip().lower()
+        return choice in ("y", "yes")
     style = questionary.Style(
         [
             ("question", "bold yellow"),
@@ -285,7 +253,7 @@ def confirmation_prompt(message: str, action: str = "Confirm", danger: bool = Fa
     )
     if q is None:
         return False
-    return q.ask() or False
+    return bool(q.ask())
 
 
 def list_apps(title: str, items: Sequence[str], count: Optional[int] = None) -> None:
@@ -296,7 +264,7 @@ def list_apps(title: str, items: Sequence[str], count: Optional[int] = None) -> 
     table.add_column("App", style="cyan", no_wrap=True)
     for idx, item in enumerate(items, 1):
         table.add_row(str(idx), item)
-    caption = Text.from_markup(f":mag_right: Found [green]{count}[/green] apps found")
+    caption = Text.from_markup(f":mag_right: Found [green]{count}[/green] apps")
     console.print(table)
     console.print(caption)
 
@@ -316,7 +284,8 @@ def match_table(title: str, matches: Sequence[dict], start_idx: int = 0, page_si
         match = matches[idx]
         official = match.get("tap", "").lower().startswith("homebrew/")
         desc = match.get("description", "")
-        desc = (desc[:55] + "…") if len(desc) > 55 else desc
+        if len(desc) > 55:
+            desc = desc[:55] + "…"
         table.add_row(
             str(idx + 1),
             Text(match.get("name", ""), style="green" if official else "white"),
@@ -326,14 +295,12 @@ def match_table(title: str, matches: Sequence[dict], start_idx: int = 0, page_si
             Text("yes" if match.get("installed") else "no", style=GOOD if match.get("installed") else BAD),
             desc,
         )
-    return Panel(table, title=title, border_style="green", box=HEAVY_EDGE)
+    return Panel(table, title=title, border_style="green", box=ROUNDED)
 
 
 def format_dry_run_candidates(
     app_candidates: Sequence[dict],
 ) -> List[dict]:
-    """Mapcask candidate dicts from ``core.brew`` into the plan-table shape
-    used by ``cli._build_planned_rows`` and ``cli.process_app``."""
     scored: List[dict] = []
     for c in app_candidates:
         if not isinstance(c, dict):
@@ -357,74 +324,11 @@ def format_dry_run_candidates(
     return scored
 
 
-def ask_match(title: str, matches: Sequence[dict], start_idx: int = 0) -> Tuple[str, Optional[str]]:
-    action = "match"
-    while True:
-        selection = None
-        clear_screen()
-        console.print(title_block())
-        console.print(flow_badge(2))
-        console.print(match_table(title, matches, start_idx=start_idx))
-        pager_choices: List[str] = []
-        if start_idx > 0:
-            pager_choices.append("⏮ Previous page")
-        if start_idx + 6 < len(matches):
-            pager_choices.append("Next page ⏭")
-        pager_choices += ["View details", "Skip app", "Ignore app", "Quit"]
-
-        if questionary is None:
-            choice = input("Choice (1..n, p, n, s, i, q): ").strip().lower()
-            if choice in ("q",):
-                return "quit", None
-            if choice in ("s",):
-                return "skip", None
-            if choice in ("i",):
-                return "ignore", None
-            if choice.isdigit():
-                idx = int(choice) - 1
-                if 0 <= idx < len(matches):
-                    selection = matches[idx].get("name", "")
-            if choice in ("p",):
-                start_idx = max(0, start_idx - 6)
-                continue
-            if choice in ("n",):
-                start_idx = min(len(matches) - 1, start_idx + 6)
-                continue
-        else:
-            chosen = questionary.select(
-                "Choose an action",
-                choices=pager_choices,
-                style=questionary.Style([("highlighted", "bold cyan")]),
-                qmark="✨",
-            ).ask()
-            if chosen is None:
-                return "quit", None
-            if chosen.startswith("⏮"):
-                start_idx = max(0, start_idx - 6)
-                continue
-            if chosen.startswith("Next"):
-                start_idx = min(max(len(matches) - 6, 0), start_idx + 6)
-                continue
-            if chosen in {"Skip app"}:
-                return "skip", None
-            if chosen in {"Ignore app"}:
-                return "ignore", None
-            if chosen == "Quit":
-                return "quit", None
-            if chosen == "View details":
-                selection = questionary.select(
-                    "Pick a match to inspect",
-                    choices=[m.get("name", "") for m in matches],
-                    style=questionary.Style([("highlighted", "bold cyan")]),
-                    qmark="🔽",
-                ).ask()
-            else:
-                selection = chosen
-        if selection:
-            return action, selection
-
-
-def display_dry_run_plan(title: str, planned_rows: Sequence[Tuple[str, dict]], export_path: Optional[str] = None) -> None:
+def display_dry_run_plan(
+    title: str,
+    planned_rows: Sequence[Tuple[str, dict]],
+    export_path: Optional[str] = None,
+) -> None:
     if not planned_rows:
         console.print(_t(f":warning: {title}: (None found)"), style=WARN)
         return
@@ -437,7 +341,9 @@ def display_dry_run_plan(title: str, planned_rows: Sequence[Tuple[str, dict]], e
     table.add_column("Version", style="yellow")
     table.add_column("Command", style="dim")
     for app, row in planned_rows:
-        official = "yes" if row.get("tap", "").lower().startswith(("homebrew/cask/", "homebrew/cask-versions/", "homebrew/cask-fonts/")) else "no"
+        official = "yes" if row.get("tap", "").lower().startswith(
+            ("homebrew/cask/", "homebrew/cask-versions/", "homebrew/cask-fonts/")
+        ) else "no"
         table.add_row(
             app,
             row.get("cask", ""),
@@ -466,7 +372,7 @@ def display_retro_list(title: str, items: Iterable[str], color: str = BRAND) -> 
         line = ""
         for col in rows:
             if row_idx < len(col):
-                line += (col[row_idx].ljust(col_min))
+                line += col[row_idx].ljust(col_min)
         console.print(line.rstrip(), style=color)
 
 
@@ -476,25 +382,232 @@ class AnimatedWait:
         self._progress = None
 
     def __enter__(self):
-        self._progress = Progress(
-            SpinnerColumn(),
-            TextColumn("[bold yellow]{task.description}[/bold yellow]"),
-            BarColumn(bar_width=None),
-            console=console,
-            transient=True,
-        )
-        self._progress.add_task(self.label, total=1)
-        self._progress.start()
+        if questionary is not None:
+            console.print(f"[bold yellow]:hourglass:  {self.label}[/bold yellow]")
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self._progress:
-            self._progress.stop()
-            if exc_type is None:
-                console.print(_t(f":white_check_mark: {self.label} complete."), style=GOOD)
-            else:
-                console.print(_t(f":warning: {self.label} ended with an issue."), style=WARN)
+        if exc_type is None:
+            console.print(f"[bold green]:white_check_mark:  {self.label} complete.[/bold green]")
+        else:
+            console.print(f"[bold red]:warning:  {self.label} ended with an issue.[/bold red]")
         return False
 
 
-import shutil
+# ---------------------------------------------------------------------------
+# Plan persistence
+# ---------------------------------------------------------------------------
+
+def _load_plan(plan_path: Path = PLAN_PATH) -> Dict[str, Any]:
+    if not plan_path.exists():
+        return {}
+    try:
+        return json.loads(plan_path.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return {}
+
+
+def _save_plan(payload: Dict[str, Any], plan_path: Path = PLAN_PATH) -> None:
+    plan_path.parent.mkdir(parents=True, exist_ok=True)
+    plan_path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def load_planned_rows(plan_path: Path = PLAN_PATH) -> List[Tuple[str, dict]]:
+    plan = _load_plan(plan_path)
+    rows = []
+    for row in plan.get("rows", []):
+        app = row.get("app", "")
+        if app:
+            rows.append((app, row))
+    return rows
+
+
+def merge_planned_rows(rows: List[Tuple[str, dict]], plan_path: Path = PLAN_PATH) -> List[Tuple[str, dict]]:
+    existing = {str(r.get("app", "")): r for r in _load_plan(plan_path).get("rows", []) if isinstance(r, dict)}
+    merged = dict(existing)
+    for app, row in rows:
+        merged[app] = {
+            "app": app,
+            "cask": row.get("cask", ""),
+            "score": row.get("score", 0),
+            "tap": row.get("tap", ""),
+            "installed": row.get("installed", ""),
+            "version": row.get("version", ""),
+            "cmd": row.get("cmd", ""),
+        }
+    return [(app, merged[app]) for app in sorted(merged.keys()) if merged[app].get("cask")]
+
+
+def upsert_planned_rows(rows: List[Tuple[str, dict]], plan_path: Path = PLAN_PATH) -> None:
+    payload = {
+        "generated_at": datetime.now().isoformat(),
+        "applications_folder": _APPLICATIONS_FOLDER,
+        "rows": [r for _, r in merge_planned_rows(rows, plan_path)],
+    }
+    _save_plan(payload, plan_path)
+
+
+# ---------------------------------------------------------------------------
+# TUI flow
+# ---------------------------------------------------------------------------
+
+def _candidate_css(row: dict) -> str:
+    official = row.get("tap", "").lower().startswith(
+        ("homebrew/cask/", "homebrew/cask-versions/", "homebrew/cask-fonts/")
+    )
+    installed = row.get("installed") == "yes"
+    score = row.get("score", 0)
+    if installed:
+        return "[green]● installed[/green]"
+    if score >= 40 and official:
+        return "[bold green]● top official[/bold green]"
+    if official:
+        return "[green]● official[/green]"
+    return "[yellow]● unofficial[/yellow]"
+
+
+def _plan_value(app: str, row: Optional[dict]) -> str:
+    if not row:
+        return ""
+    return row.get("cask", "(none)")
+
+
+def _plan_checkbox_label(app: str, row: Optional[dict]) -> str:
+    if not row:
+        return f"{app} [dim red](no match)[/dim red]"
+    label = _plan_value(app, row)
+    css = _candidate_css(row)
+    return f"{app}  →  {label}  {css}"
+
+
+def main_menu(plan_size: int = 0, history_size: int = 0) -> str:
+    console.clear()
+    console.print(
+        Align.center(
+            Text("🍺  Brew Migrator", style="bold cyan"),
+        )
+    )
+    console.print(
+        Align.center(
+            Text("scan  →  match  →  select  →  install", style=MUTED),
+        )
+    )
+    console.print()
+    choices = [
+        questionary.Choice(
+            title=f":mag:  Scan & Plan  {'(' + str(plan_size) + ' ready)' if plan_size else '(fresh)'}",
+            value="scan",
+        ),
+        questionary.Choice(
+            title=f":rocket:  Install Selected Plan  {'(' + str(plan_size) + ')' if plan_size else '(no plan yet)'}",
+            value="install",
+            disabled=(not plan_size),
+        ),
+        questionary.Choice(
+            title=f":eyes:  View History  {'(' + str(history_size) + ')' if history_size else '(empty)'}",
+            value="history",
+            disabled=(not history_size),
+        ),
+        questionary.Choice(
+            title=f":recycle:  Retry Failed / Skipped",
+            value="retry",
+        ),
+        questionary.Choice(
+            title=":door:  Quit",
+            value="quit",
+        ),
+    ]
+    style = questionary.Style(
+        [
+            ("question", "bold yellow"),
+            ("answer", "bold green"),
+            ("highlighted", "bold cyan"),
+        ]
+    )
+    if questionary is None:
+        while True:
+            print("\n".join(f"{i+1}. {c.title}" for i, c in enumerate(choices)))
+            picked = input("Choose: ").strip()
+            if picked.isdigit() and 1 <= int(picked) <= len(choices):
+                return choices[int(picked) - 1].value
+            continue
+    return questionary.select(
+        "What next?",
+        choices=choices,
+        style=style,
+        qmark="✨",
+        use_shortcuts=True,
+        use_jk_keys=True,
+        instruction="(up/down/enter)",
+    ).ask() or "quit"
+
+
+# ---------------------------------------------------------------------------
+# History / plan helpers used by the TUI
+# ---------------------------------------------------------------------------
+
+def history_table(history: Dict[str, dict]) -> Table:
+    table = Table(title="Migration History", box=HEAVY_EDGE, expand=True)
+    table.add_column("App", style="bold cyan", no_wrap=True)
+    table.add_column("Status", style="green", no_wrap=True)
+    table.add_column("Detail", style="white", no_wrap=False)
+    table.add_column("Updated", style="magenta", no_wrap=True)
+    for app in sorted(history.keys()):
+        entry = history[app]
+        status = entry.get("status", "")
+        style = GOOD if status.startswith("migrated") else (BAD if status == "failed" else WARN)
+        table.add_row(
+            app,
+            Text(status, style=style),
+            entry.get("detail", ""),
+            entry.get("timestamp", ""),
+        )
+    return table
+
+
+def plan_table(planned: List[Tuple[str, dict]]) -> Table:
+    table = Table(title="Plan", box=HEAVY_EDGE, expand=True)
+    table.add_column("App", style="bold cyan", no_wrap=True)
+    table.add_column("Match", style="white", no_wrap=True)
+    table.add_column("Score", justify="right", style=GOOD, width=7)
+    table.add_column("Tap", style="magenta")
+    table.add_column("Version", style="yellow")
+    table.add_column("Installed", justify="center")
+    table.add_column("Status", style=WARN)
+    for app, row in planned:
+        official = row.get("tap", "").lower().startswith(("homebrew/cask/", "homebrew/cask-versions/", "homebrew/cask-fonts/"))
+        status = "[green]ready[/green]"
+        if row.get("installed"):
+            status = "[green]installed[/green]"
+        elif not row.get("cask"):
+            status = "[red]no match[/red]"
+        table.add_row(
+            app,
+            row.get("cask", "(none)"),
+            str(row.get("score", "")),
+            row.get("tap", "") or "—",
+            row.get("version", "") or "—",
+            "yes" if row.get("installed") else "no",
+            status,
+        )
+    return table
+
+
+def summary_table(newly_migrated, failed, skipped, ignored) -> Table:
+    table = Table(title="Session Summary", box=HEAVY_EDGE, expand=True)
+    table.add_column("Category", style="bold cyan", no_wrap=True)
+    table.add_column("Count", justify="right", style=GOOD, width=6)
+    table.add_column("Items", style="white", no_wrap=False)
+    for label, items in [
+        ("Migrated", newly_migrated),
+        ("Failed", failed),
+        ("Skipped", skipped),
+        ("Ignored", ignored),
+    ]:
+        text_color = GOOD if label == "Migrated" else (BAD if label == "Failed" else WARN)
+        table.add_row(
+            Text(label, style=text_color),
+            Text(str(len(items)), style=text_color),
+            Text(", ".join(items[:8]) if items else "—"),
+        )
+    return table
