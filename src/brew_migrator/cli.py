@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
-from rich.box import ROUNDED, SIMPLE_HEAD
+from rich.box import ROUNDED
 
 from .core.history import HistoryManager, HISTORY_PATH
 from .core.brew import (
@@ -44,7 +44,6 @@ from .ui.console import (
     display_dry_run_plan,
     display_retro_list,
     history_table,
-    list_apps,
     load_planned_rows,
     main_menu,
     match_table,
@@ -108,26 +107,45 @@ def _auto_match_confidence(candidates: List[dict]) -> bool:
 
 
 def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tuple[str, Optional[dict]]]:
-    """New flow: show all apps → batch-match → review → manual → install.
+    """Batch-match apps and let user review before install.
 
-    Phase 1 – Show every app found.
-    Phase 2 – Batch-match: 1-1 / high-confidence → auto-select; 0 → skip silently.
-    Phase 3 – Present results, ask user if they're satisfied.
-    Phase 4 – Let user manually match remaining (ambiguous) apps.
-    Phase 5 – Return all matched apps for the caller to auto-select + install.
+    Shows welcome, matches every app in one pass (1-1 / high-confidence →
+    auto-select; 0 candidates → skip silently), then presents a consolidated
+    table of all results. User can approve auto-matches or move everything
+    to manual review. Then runs the manual-matching TUI for ambiguous apps.
+    All matched apps are returned for the caller to checkbox-review + install.
     """
     app_names = list_app_names(applications_folder)
     if not app_names:
         console.print(trust_banner("No apps found. Override path from the main menu if needed.", kind="danger"))
         return []
     console.print(welcome_panel())
-    console.print(f"Apps found: [bold green]{len(app_names)}[/bold green]\n")
+    console.print(_t(f"[bold green]{len(app_names)}[/bold green] applications found\n"))
 
-    # Phase 1 — show all apps
-    list_apps("Applications", app_names, count=len(app_names))
+    # Pre-scanning page: show all apps in a table
+    app_table = Table(
+        title=_t("[bold]Applications[/bold]"),
+        box=ROUNDED,
+        expand=False,
+        show_header=False,
+        border_style="cyan",
+    )
+    # Split into 3 columns for density
+    n = len(app_names)
+    chunk = (n + 2) // 3
+    cols = [app_names[i:i+chunk] for i in range(0, n, chunk)]
+    for _ in range(3):
+        app_table.add_column(style="cyan", no_wrap=True)
+    max_rows = max(len(c) for c in cols)
+    for i in range(max_rows):
+        row = []
+        for c in cols:
+            row.append(c[i] if i < len(c) else "")
+        app_table.add_row(*row)
+    console.print(app_table)
     console.print()
 
-    # Phase 2 — batch match
+    # Batch match
     auto_matched: Dict[str, dict] = {}       # app → candidate
     needs_manual: List[Tuple[str, List[dict]]] = []   # (app, candidates)
     no_match: List[str] = []                  # apps with 0 candidates
