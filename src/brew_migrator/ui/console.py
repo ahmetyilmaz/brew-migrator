@@ -1,170 +1,426 @@
+from __future__ import annotations
+
 import os
 import sys
 import time
-import threading
+from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
-# ANSI color codes
-GREEN = "\033[32m"
-CYAN = "\033[36m"
-YELLOW = "\033[33m"
-RED = "\033[31m"
-RESET = "\033[0m"
+from rich.console import Console
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
+from rich.markdown import Markdown
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
+from rich.align import Align
+from rich.box import box
 
-PAGE_SIZE = 5
+try:
+    import questionary
+except Exception:  # pragma: no cover
+    questionary = None
 
-
-import shutil
-
-
-def display_retro_list(title, items, color=CYAN):
-    """Display a beautifully formatted retro list with multi-column support."""
-    retro_print(f"\n┌─{'─' * len(title)}─┐", color)
-    retro_print(f"│ {title.upper()} │", color)
-    retro_print(f"└─{'─' * len(title)}─┘", color)
-
-    if not items:
-        retro_print("  (None found)", YELLOW)
-        return
-
-    sorted_items = sorted(items)
-
-    # Calculate column widths
-    term_width = shutil.get_terminal_size((80, 20)).columns
-    # Add 4 for "  ▸ " bullet
-    max_len = max(len(item) for item in sorted_items) + 4
-    # Ensure there's at least one col and some padding
-    col_width = max_len + 2
-    num_cols = max(1, term_width // col_width)
-
-    # Calculate rows needed
-    num_items = len(sorted_items)
-    num_rows = (num_items + num_cols - 1) // num_cols
-
-    for r in range(num_rows):
-        row_str = ""
-        for c in range(num_cols):
-            idx = r + c * num_rows
-            if idx < num_items:
-                item = sorted_items[idx]
-                col_item = f"  {color}▸{RESET} {item}"
-                # Add padding unless it's the last column
-                if c < num_cols - 1:
-                    row_str += col_item.ljust(col_width + (len(color) + len(RESET)))
-                else:
-                    row_str += col_item
-        retro_print(row_str)
-    print()
-
-TITLE_ART = """
-╔═════════════════════════════════╗
-║    HOMEBREW APP MIGRATOR v0.0.2 ║
-╚═════════════════════════════════╝
-"""
+_APPLICATIONS_FOLDER = "/Applications"
 
 
-def clear_screen():
-    """Clear the terminal screen."""
+def _use_colors() -> bool:
+    if os.environ.get("NO_COLOR") == "1" or os.environ.get("NO_ANSI") == "1":
+        return False
+    if hasattr(sys.stdout, "isatty") and not sys.stdout.isatty():
+        return False
+    return True
+
+
+console = Console(force_terminal=_use_colors(), color_system="standard")
+err_console = Console(stderr=True, force_terminal=_use_colors(), color_system="standard")
+
+BRAND = "bold cyan"
+GOOD = "bold green"
+WARN = "bold yellow"
+BAD = "bold red"
+MUTED = "dim"
+
+
+def _t(text: str) -> Text:
+    return Text.from_markup(text)
+
+
+def boot_spinner(label: str = "Brew Migrator", duration: float = 0.6) -> None:
+    frames = [
+        f"{label} ●   ",
+        f"{label} ●●  ",
+        f"{label} ●●● ",
+        f"{label} ●●●●",
+    ]
+    delay = max(duration / max(len(frames), 1), 0.03)
+    for frame in frames:
+        sys.stdout.write(f"\r{frame}")
+        sys.stdout.flush()
+        time.sleep(delay)
+    sys.stdout.write("\r")
+    sys.stdout.flush()
+
+
+def clear_screen() -> None:
+    # Safe: no user input reaches this call.
     os.system("cls" if os.name == "nt" else "clear")
 
 
-def type_text(text, delay=0.03):
-    """Simulate typewriter effect for retro feel."""
-    for char in text:
-        sys.stdout.write(char)
-        sys.stdout.flush()
-        time.sleep(delay)
-    print()
+def title_block(version: str = "v0.0.3") -> Panel:
+    body = Text.assemble(
+        ("Homebrew App Migrator ", "bold white"),
+        (version, "green"),
+        ("\n", ""),
+        ("Mac  ", "dim"),
+        ("→ ", "dim"),
+        ("Homebrew Cask ", "bold cyan"),
+        ("× ", ""),
+        ("Charm UI ", "bold magenta"),
+    )
+    return Panel(
+        Align.center(body, vertical="middle"),
+        title=_t("[bold cyan]BREW MIGRATOR[/bold cyan]"),
+        subtitle=_t("[dim]charm.land-inspired terminal experience[/dim]"),
+        border_style="cyan",
+        box=box.HEAVY_EDGE,
+        padding=(0, 3),
+    )
 
 
-def retro_input(prompt):
-    """Display a retro-style prompt for user input."""
-    type_text(prompt, delay=0.02)
-    return input(CYAN + "> " + RESET).strip().upper()
+def flow_badge(step: int) -> Panel:
+    lines = [
+        _build_step(0, step, "Scan", ":satellite: Reading /Applications"),
+        _build_step(1, step, "Match", ":mag_right: Finding Cask candidates"),
+        _build_step(2, step, "Rank", ":chart_increasing: Scoring + official-tap filter"),
+        _build_step(3, step, "Decide", ":ticket: Confirm, review, or skip each app"),
+        _build_step(4, step, "Finish", ":sparkles: Generate session summary"),
+    ]
+    body = "\n".join(lines)
+    return Panel(
+        Text.from_markup(body, style=BRAND),
+        title=_t("[bold white]Progress[/bold white]"),
+        border_style="blue",
+        box=box.MINIMAL,
+        padding=(0, 1),
+    )
 
 
-def retro_print(text, color=RESET, newline=True):
-    """Print text with retro styling."""
-    print(f"{color}{text}{RESET}", end="\n" if newline else "")
+def _build_step(index: int, current: int, label: str, detail: str) -> str:
+    if index < current:
+        state = ":white_check_mark:"
+        style = GOOD
+    elif index == current:
+        state = ":star2:"
+        style = BRAND
+    else:
+        state = ":white_circle:"
+        style = MUTED
+    return f"{state} [{style}]{label}[/] [dim]{detail}[/dim]\n"
 
 
-def press_enter_to_continue():
-    """Pauses execution until user presses Enter."""
-    print()
-    input(f"{YELLOW}[PRESS ENTER TO CONTINUE]{RESET}")
+def welcome_panel(app_count: int, history_count: int, ignore_count: int) -> Panel:
+    md = "\n".join(
+        [
+            "**Walkthrough**",
+            "1. **Scan** — reads `" + _APPLICATIONS_FOLDER + "` and lists apps left to process",
+            "2. **Match** — calls Homebrew, prefers `homebrew/cask` when available",
+            "3. **Decide** — choose the best match, preview the command, and confirm destructive actions",
+            f"4. **History** — remembers migrated/skipped/failed so reruns skip real apps automatically",
+            "",
+            f"**This run** — apps: {app_count} · entries: {history_count + ignore_count}",
+        ]
+    )
+    return Panel(
+        Markdown(md),
+        title=_t("[bold white]Welcome, friend.[/bold white]"),
+        subtitle=_t("[dim]You stayed on the safe path.[/dim]"),
+        border_style="magenta",
+        box=box.DOUBLE,
+        padding=(1, 2),
+    )
 
 
-def display_paginated_matches(matches, start_idx, total):
-    """Display matches in paginated format."""
-    end_idx = start_idx + PAGE_SIZE
-    current_matches = matches[start_idx:end_idx]
+def animated_boot(seconds: float = 0.8) -> None:
+    first = 0.4 * seconds
+    second = 0.35 * seconds
+    third = 0.1 * seconds
+    last = 0.15 * seconds
+    boot_spinner("Brew Migrator", duration=max(first, 0.3))
 
-    retro_print(f"MATCHES {start_idx + 1}-{min(end_idx, total)} of {total}:", GREEN)
-    for i, match in enumerate(current_matches, 1):
-        retro_print(f"  [{start_idx + i}] {match}")
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[bold yellow]{task.description}[/bold yellow]"),
+        BarColumn(bar_width=None),
+        console=console,
+        transient=True,
+    ) as progress:
+        task_id = progress.add_task("Preparing workspace", total=1)
+        time.sleep(first)
+        try:
+            progress.advance(task_id, 0.02)
+        except TypeError:  # compitible fallback for older rich APIs
+            progress.advance(task_id)
+        time.sleep(second)
+        try:
+            progress.advance(task_id, 0.05)
+        except TypeError:
+            progress.advance(task_id)
+        time.sleep(third)
+        try:
+            progress.advance(task_id, 0.93)
+        except TypeError:
+            progress.advance(task_id)
+        time.sleep(last)
 
-    options = []
-    if start_idx > 0:
-        options.append(("[P] PREVIOUS PAGE", YELLOW))
-    if end_idx < total:
-        options.append(("[N] NEXT PAGE", YELLOW))
-    options.append(("[S] SKIP", YELLOW))
-    options.append(("[I] IGNORE", RED))
-    options.append(("[Q] QUIT", RED))
 
-    retro_print("  " + "  ".join([f"{color}{text}{RESET}" for text, color in options]))
+def trust_banner(text: str, kind: str = "default") -> Panel:
+    styles = {
+        "force": "bold red",
+        "danger": "bold yellow",
+        "default": "bold magenta",
+    }
+    style = styles.get(kind, "bold magenta")
+    return Panel(
+        _t(f"⚠️  {text}"),
+        title=_t("[bold white]Trust action[/bold white]"),
+        border_style=style,
+        box=box.SQUARE,
+        padding=(0, 1),
+    )
 
 
-class ProgressBar:
-    """A retro-style indeterminate progress bar."""
+def preview_panel(app: str, candidate: dict, force: bool = False, dry_run: bool = False) -> Panel:
+    tap = candidate.get("tap", "")
+    desc = candidate.get("description", "")
+    version = candidate.get("version", "")
+    installed = candidate.get("installed", "")
+    official = tap.lower().startswith("homebrew/")
+    official_md = ":white_check_mark:" if official else ":x:"
 
-    def __init__(self, message=None):
-        self.message = message
-        self.running = False
-        self._thread = None
-        self.width = 20
+    command = candidate.get("command", ["brew", "install", "--cask", candidate.get("name", app)])
+    cmd = " ".join(command)
 
-    def _animate(self):
-        pos = 0
-        direction = 1
+    body = Text.from_markup(
+        "\n".join(
+            [
+                f":robot: **{app}** → :package: **{candidate.get('name', app)}**",
+                f":test_tube: Version: [green]{version or 'unknown'}[/green]",
+                f":movie_camera: Tap: [magenta]{tap or 'unknown'}[/magenta]",
+                f":house_with_garden: Official cask: [green]{official_md}[/green]",
+                f":construction_worker: Already installed: {'[green]yes[/green]' if installed else '[red]no[/red]'}",
+                f":shield: Force install: {'[red]yes[/red]' if force else '[green]no[/green]'}",
+                "",
+                f":computer: **Command**\n[cyan]{cmd}[/cyan]",
+            ]
+        ),
+    )
+    return Panel(
+        body,
+        title=_t("[bold white]Action preview[/bold white]"),
+        subtitle=_t("[dim]Read carefully before confirming.[/dim]"),
+        border_style="yellow",
+        box=box.HEAVY,
+        padding=(0, 2),
+    )
 
-        while self.running:
-            # Create a pulsing block that moves back and forth
-            bar = [" "] * self.width
-            # Draw a 4-block wide pulse
-            for i in range(4):
-                idx = (pos + i) % self.width
-                bar[idx] = "█"
 
-            bar_str = "".join(bar)
-            msg = f" {YELLOW}{self.message}...{RESET}" if self.message else ""
-            sys.stdout.write(f"\r{CYAN}[{bar_str}]{RESET}{msg}")
-            sys.stdout.flush()
+def confirmation_prompt(message: str, action: str = "Confirm", danger: bool = False) -> bool:
+    style = questionary.Style(
+        [
+            ("question", "bold yellow"),
+            ("answer", "bold green"),
+            ("highlighted", "bold cyan"),
+        ]
+    )
+    q = questionary.confirm(
+        message,
+        default=False,
+        style=style,
+        qmark="⚠️",
+    )
+    if q is None:
+        return False
+    return q.ask() or False
 
-            pos += direction
-            if pos >= self.width - 4 or pos <= 0:
-                direction *= -1
 
-            time.sleep(0.08)
+def list_apps(title: str, items: Sequence[str], count: Optional[int] = None) -> None:
+    if count is None:
+        count = len(items)
+    table = Table(title=title, box=box.SIMPLE_HEAD)
+    table.add_column("#", justify="right", style="dim", width=5)
+    table.add_column("App", style="cyan", no_wrap=True)
+    for idx, item in enumerate(items, 1):
+        table.add_row(str(idx), item)
+    caption = Text.from_markup(f":mag_right: Found [green]{count}[/green] apps found")
+    console.print(table)
+    console.print(caption)
+
+
+def match_table(title: str, matches: Sequence[dict], start_idx: int = 0, page_size: int = 6) -> Panel:
+    end_idx = min(start_idx + page_size, len(matches))
+    table = Table(box=box.SIMPLE_HEAD, row_styles=["on black", ""])
+    table.add_column("#", style="dim", width=4)
+    table.add_column("Cask", style="cyan", no_wrap=True)
+    table.add_column("Score", justify="right", style="green", width=7)
+    table.add_column("Tap", style="magenta")
+    table.add_column("Version", style="yellow")
+    table.add_column("Installed", justify="center")
+    table.add_column("Description", style="dim")
+
+    for idx in range(start_idx, end_idx):
+        match = matches[idx]
+        official = match.get("tap", "").lower().startswith("homebrew/")
+        desc = match.get("description", "")
+        desc = (desc[:55] + "…") if len(desc) > 55 else desc
+        table.add_row(
+            str(idx + 1),
+            Text(match.get("name", ""), style="green" if official else "white"),
+            str(match.get("score", "")),
+            match.get("tap", "") or "—",
+            match.get("version", "") or "—",
+            Text("yes" if match.get("installed") else "no", style=GOOD if match.get("installed") else BAD),
+            desc,
+        )
+    return Panel(table, title=title, border_style="green", box=box.HEAVY_EDGE)
+
+
+def ask_match(title: str, matches: Sequence[dict], start_idx: int = 0) -> Tuple[str, Optional[str]]:
+    action = "match"
+    while True:
+        selection = None
+        clear_screen()
+        console.print(title_block())
+        console.print(flow_badge(2))
+        console.print(match_table(title, matches, start_idx=start_idx))
+        pager_choices: List[str] = []
+        if start_idx > 0:
+            pager_choices.append("⏮ Previous page")
+        if start_idx + 6 < len(matches):
+            pager_choices.append("Next page ⏭")
+        pager_choices += ["View details", "Skip app", "Ignore app", "Quit"]
+
+        if questionary is None:
+            choice = input("Choice (1..n, p, n, s, i, q): ").strip().lower()
+            if choice in ("q",):
+                return "quit", None
+            if choice in ("s",):
+                return "skip", None
+            if choice in ("i",):
+                return "ignore", None
+            if choice.isdigit():
+                idx = int(choice) - 1
+                if 0 <= idx < len(matches):
+                    selection = matches[idx].get("name", "")
+            if choice in ("p",):
+                start_idx = max(0, start_idx - 6)
+                continue
+            if choice in ("n",):
+                start_idx = min(len(matches) - 1, start_idx + 6)
+                continue
+        else:
+            chosen = questionary.select(
+                "Choose an action",
+                choices=pager_choices,
+                style=questionary.Style([("highlighted", "bold cyan")]),
+                qmark="✨",
+            ).ask()
+            if chosen is None:
+                return "quit", None
+            if chosen.startswith("⏮"):
+                start_idx = max(0, start_idx - 6)
+                continue
+            if chosen.startswith("Next"):
+                start_idx = min(max(len(matches) - 6, 0), start_idx + 6)
+                continue
+            if chosen in {"Skip app"}:
+                return "skip", None
+            if chosen in {"Ignore app"}:
+                return "ignore", None
+            if chosen == "Quit":
+                return "quit", None
+            if chosen == "View details":
+                selection = questionary.select(
+                    "Pick a match to inspect",
+                    choices=[m.get("name", "") for m in matches],
+                    style=questionary.Style([("highlighted", "bold cyan")]),
+                    qmark="🔽",
+                ).ask()
+            else:
+                selection = chosen
+        if selection:
+            return action, selection
+
+
+def display_dry_run_plan(title: str, planned_rows: Sequence[Tuple[str, dict]], export_path: Optional[str] = None) -> None:
+    if not planned_rows:
+        console.print(_t(f":warning: {title}: (None found)"), style=WARN)
+        return
+    table = Table(title=title, box=box.HEAVY, expand=True)
+    table.add_column("App", style="bold cyan", no_wrap=True)
+    table.add_column("Proposed Cask", style="white", no_wrap=True)
+    table.add_column("Score", justify="right", style=GOOD, width=8)
+    table.add_column("Official", justify="center")
+    table.add_column("Installed", justify="center")
+    table.add_column("Version", style="yellow")
+    table.add_column("Command", style="dim")
+    for app, row in planned_rows:
+        official = "yes" if row.get("tap", "").lower().startswith(("homebrew/cask/", "homebrew/cask-versions/", "homebrew/cask-fonts/")) else "no"
+        table.add_row(
+            app,
+            row.get("cask", ""),
+            str(row.get("score", "")),
+            official,
+            row.get("installed", ""),
+            row.get("version", ""),
+            row.get("cmd", ""),
+        )
+    console.print(table)
+    if export_path:
+        console.print(_t(f":memo: Plan exported to: {export_path}"), style=MUTED)
+
+
+def display_retro_list(title: str, items: Iterable[str], color: str = BRAND) -> None:
+    sorted_items = sorted(items)
+    term_width = getattr(console, "size", None)
+    col_min = 24
+    term_width = term_width.width if term_width else shutil.get_terminal_size((80, 20)).columns
+    num_cols = max(1, term_width // col_min)
+    rows: List[List[str]] = [[] for _ in range(num_cols)]
+    for idx, item in enumerate(sorted_items):
+        rows[idx % num_cols].append(f"▸ {item}")
+    num_rows = max((len(col) for col in rows), default=0)
+    for row_idx in range(num_rows):
+        line = ""
+        for col in rows:
+            if row_idx < len(col):
+                line += (col[row_idx].ljust(col_min))
+        console.print(line.rstrip(), style=color)
+
+
+class AnimatedWait:
+    def __init__(self, label: str = "Working") -> None:
+        self.label = label
+        self._progress = None
 
     def __enter__(self):
-        self.running = True
-        # Hide cursor
-        sys.stdout.write("\033[?25l")
-        sys.stdout.flush()
-
-        self._thread = threading.Thread(target=self._animate)
-        self._thread.daemon = True
-        self._thread.start()
+        self._progress = Progress(
+            SpinnerColumn(),
+            TextColumn("[bold yellow]{task.description}[/bold yellow]"),
+            BarColumn(bar_width=None),
+            console=console,
+            transient=True,
+        )
+        self._progress.add_task(self.label, total=1)
+        self._progress.start()
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        self.running = False
-        if self._thread:
-            self._thread.join()
+        if self._progress:
+            self._progress.stop()
+            if exc_type is None:
+                console.print(_t(f":white_check_mark: {self.label} complete."), style=GOOD)
+            else:
+                console.print(_t(f":warning: {self.label} ended with an issue."), style=WARN)
+        return False
 
-        # Show cursor
-        sys.stdout.write("\033[?25h")
-        # Clean up the line thoroughly
-        msg_len = len(self.message) + 4 if self.message else 0
-        sys.stdout.write("\r" + " " * (self.width + msg_len + 5) + "\r")
-        sys.stdout.flush()
+
+import shutil

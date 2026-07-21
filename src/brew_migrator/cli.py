@@ -1,226 +1,340 @@
 import os
 import sys
 import time
+import json
+from datetime import datetime
+
 import argparse
-from .ui.console import (
-    TITLE_ART, type_text, retro_input, retro_print,
-    press_enter_to_continue, display_paginated_matches,
-    display_retro_list, GREEN, CYAN, YELLOW, RED, RESET, PAGE_SIZE
-)
-from .core.history import HistoryManager, HISTORY_PATH
+
+from .history import HistoryManager, HISTORY_PATH
 from .core.brew import (
-    find_matches, is_already_installed, install_homebrew_package, check_brew_installed
+    find_matches,
+    is_already_installed,
+    install_homebrew_package,
+    check_brew_installed,
+    get_cask_candidates,
+)
+from .ui.console import (
+    title_block,
+    flow_badge,
+    welcome_panel,
+    trust_banner,
+    preview_panel,
+    confirmation_prompt,
+    list_apps,
+    ask_match,
+    display_dry_run_plan,
+    format_dry_run_candidates,
+    display_retro_list,
+    animated_boot,
+    AnimatedWait,
+    _write_dry_run_plan,
+    _use_colors,
+    BRAND,
+    GOOD,
+    WARN,
+    BAD,
+    MUTED,
 )
 
 APPLICATIONS_FOLDER = "/Applications"
+PLAN_PATH = os.path.join(os.path.dirname(HISTORY_PATH), "brew_migrator_plan.json")
 
 
-def process_app(app_name, history_manager, batch_mode=False, dry_run=False):
-    """Process a single application with one screen per app UI."""
-    # For batch mode, we don't clear the screen to maintain a log of progress
-    if batch_mode:
-        retro_print(f"\nSCANNING: {app_name}", YELLOW)
+def _build_planned_rows(apps: list[str]) -> list[tuple[str, dict]]:
+    rows: list[tuple[str, dict]] = []
+    for app_name in apps:
+        app_candidates = get_cask_candidates(app_name)
+        scored = format_dry_run_candidates(app_candidates)
+        top = scored[0] if scored else {
+            "cask": "(none)",
+            "score": 0,
+            "tap": "",
+            "installed": "",
+            "version": "",
+            "cmd": "",
+        }
+        rows.append((app_name, top))
+    return rows
+
+
+def _update_plan(rows: list[tuple[str, dict]], plan_path: str = PLAN_PATH) -> str:
+    existing: dict = {}
+    if os.path.exists(plan_path):
+        try:
+            with open(plan_path, "r", encoding="utf-8") as f:
+                existing = json.load(f) or {}
+        except Exception:
+            existing = {}
+
+    existing_rows = {str(row.get("app", "")): row for row in existing.get("rows", []) if isinstance(row, dict)}
+    merged: dict = dict(existing_rows)
+    for app, row in rows:
+        merged[app] = {
+            "app": app,
+            "cask": row.get("cask", ""),
+            "score": row.get("score", 0),
+            "tap": row.get("tap", ""),
+            "installed": row.get("installed", ""),
+            "version": row.get("version", ""),
+            "cmd": row.get("cmd", ""),
+        }
+    payload = {
+        "generated_at": datetime.now().isoformat(),
+        "applications_folder": APPLICATIONS_FOLDER,
+        "rows": [merged[k] for k in sorted(merged.keys()) if merged[k].get("cask")],
+    }
+    os.makedirs(os.path.dirname(plan_path) or ".", exist_ok=True)
+    with open(plan_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    return plan_path
+
+
+def run_plan(apps: list[str], plan_path: str = PLAN_PATH) -> str:
+    rows = _build_planned_rows(apps)
+    display_dry_run_plan("PLAN", rows, export_path=plan_path)
+    _update_plan(rows, plan_path)
+    print("Plan updated: {0}".format(plan_path))
+    return plan_path
+
+
+def _apply_plan(plan_json_path: str, history_manager: "HistoryManager", force: bool = False) -> bool:
+    if not os.path.exists(plan_json_path):
+        print("Plan file not found: {0}".format(plan_json_path))
+        return False
+
+    try:
+        with open(plan_json_path, "r", encoding="utf-8") as f:
+            plan = json.load(f)
+    except Exception as e:
+        print("Failed to read plan: {0}".format(e))
+        return False
+
+    rows = plan.get("rows", [])
+    if not rows:
+        print("Plan is empty.")
+        return True
+
+    filtered = []
+    for row in rows:
+        app = row.get("app")
+        cask = row.get("cask")
+        if not app or not cask or cask == "(none)":
+            continue
+        entry = history_manager.get(app)
+        if entry:
+            status = entry.get("status")
+            if isinstance(status, str) and status.startswith("migrated"):
+                continue
+        filtered.append((app, cask))
+
+    if not filtered:
+        print("Nothing to apply from plan.")
+        return True
+
+    click = confirmation_prompt(
+        "Apply plan with {0} install(s)?".format(len(filtered)),
+        action="Apply plan",
+        danger=False,
+    )
+    if not click:
+        print("Plan apply cancelled.")
+        return False
+
+    failures = []
+    for app_name, cask in filtered:
+        success = False
+        if is_already_installed(cask, True):
+            print("Already installed: {0}".format(cask))
+            history_manager.update(app_name, "migrated", cask)
+            success = True
+        else:
+            _, success = install_homebrew_package(cask, True, app_name, history_manager, dry_run=False, force=force)
+        if not success:
+            failures.append(app_name)
+
+    if failures:
+        print("Applied with failures: {0}".format(", ".join(failures)))
     else:
-        # In interactive mode, we clear BEFORE showing the "SCANNING" message
-        # so that each app starts with its own header at the top of the screen.
-        from .ui.console import clear_screen
-        clear_screen()
-        print(CYAN + TITLE_ART + RESET)
-        retro_print(f"SCANNING: {app_name}...", YELLOW)
+        print("Plan applied successfully.")
+    return True
 
-    cask_matches = find_matches(app_name, "cask")
 
-    if not cask_matches:
-        retro_print(f"NO MATCHES FOUND FOR {app_name}. SKIPPING...", YELLOW)
-        history_manager.update(app_name, "skipped", "no_cask_found")
-        time.sleep(0.6)
+def process_app(app_name, history_manager, batch_mode=False, dry_run=False, force=False):
+    app_candidates = get_cask_candidates(app_name)
+
+    if dry_run:
+        planned_candidate = app_candidates[0] if app_candidates else None
+        rows = format_dry_run_candidates(app_candidates[:5] if app_candidates else [])
+        if rows:
+            display_dry_run_plan("PLAN: {0}".format(app_name), [(app_name, rows[0])])
+        else:
+            display_dry_run_plan("PLAN: {0}".format(app_name), [(app_name, {
+                "cask": "(none)",
+                "score": 0,
+                "tap": "",
+                "installed": "",
+                "version": "",
+                "cmd": "",
+            })])
+
+        if planned_candidate and planned_candidate.get("installed") == "yes":
+            print("Status: already installed, no action.")
+        else:
+            print("Status: would install best-matching cask.")
         return
 
     if batch_mode:
-        selected_cask = cask_matches[0]
-        type_text(f"BATCH MODE: Installing top match '{selected_cask}'...")
+        with AnimatedWait("Batching"):
+            time.sleep(0.2)
+        selected_candidate = app_candidates[0]
+        selected = selected_candidate.get("name")
 
-        if is_already_installed(selected_cask, True):
-            retro_print(f"ALREADY INSTALLED: {selected_cask}", GREEN)
-            history_manager.update(app_name, "migrated", selected_cask)
+        if is_already_installed(selected, True):
+            print("Already installed: {0}".format(selected))
+            history_manager.update(app_name, "migrated", selected)
             return
 
-        if install_homebrew_package(selected_cask, True, app_name, history_manager, dry_run=dry_run):
-            if dry_run:
-                retro_print("DRY RUN: Skip actual install", YELLOW)
-            else:
-                retro_print("INSTALLATION SUCCESSFUL", GREEN)
+        click = confirmation_prompt(
+            "Install {0}?".format(selected),
+            action="Batch install",
+            danger=force,
+        )
+        if not click:
+            return
+
+        cmd, success = install_homebrew_package(selected, True, app_name, history_manager, dry_run=False, force=force)
+        if success:
+            print("Installed: {0}".format(selected))
         else:
-            retro_print("BATCH INSTALL FAILED - LOGGED IN HISTORY", RED)
+            print("Install failed: {0}".format(selected))
         return
 
-    total_matches = len(cask_matches)
-    start_idx = 0
+    if not app_candidates:
+        print("No matches for {0}. skipped.".format(app_name))
+        history_manager.update(app_name, "skipped", "no_cask_found")
+        return
 
     while True:
-        from .ui.console import clear_screen
-        clear_screen()
-        print(CYAN + TITLE_ART + RESET)
-        retro_print(f"Processing: {app_name}", CYAN)
-        display_paginated_matches(cask_matches, start_idx, total_matches)
-
-        choice = retro_input("\nSELECT OPTION:")
-
-        if choice.isdigit():
-            choice_idx = int(choice) - 1
-            if 0 <= choice_idx < total_matches:
-                selected_cask = cask_matches[choice_idx]
-
-                if is_already_installed(selected_cask, True):
-                    retro_print(f"ALREADY INSTALLED: {selected_cask}", GREEN)
-                    history_manager.update(app_name, "migrated", selected_cask)
-                    time.sleep(0.8)
-                    return
-
-                retro_print(f"WARNING: This will force install '{selected_cask}'", YELLOW)
-                type_text(f"ATTEMPTING TO INSTALL: {selected_cask}")
-
-                if install_homebrew_package(selected_cask, True, app_name, history_manager, dry_run=dry_run):
-                    if dry_run:
-                        retro_print("DRY RUN: Skip actual install", YELLOW)
-                    else:
-                        retro_print("INSTALLATION SUCCESSFUL", GREEN)
-                    time.sleep(0.8)
-                    return
-                else:
-                    retro_print("\nINSTALLATION FAILED", RED)
-                    press_enter_to_continue()
-
-        elif choice == "N" and (start_idx + PAGE_SIZE) < total_matches:
-            start_idx += PAGE_SIZE
-        elif choice == "P" and start_idx > 0:
-            start_idx -= PAGE_SIZE
-        elif choice == "S":
-            retro_print("SKIPPED", YELLOW)
+        mode, selected_name = ask_match("Select match", app_candidates)
+        if mode == "quit":
+            return selected_name, False
+        if mode == "skip":
+            print("Skipped.")
             history_manager.update(app_name, "skipped", "user_skipped")
-            time.sleep(0.5)
-            return
-        elif choice == "I":
-            retro_print("IGNORED", RED)
-            history_manager.update(app_name, "ignored", "user_ignored")
-            time.sleep(0.5)
-            return
-        elif choice == "Q":
-            retro_print("QUITTING...", RED)
-            sys.exit(0)
-        else:
-            retro_print("INVALID CHOICE.", RED)
-            press_enter_to_continue()
+            return selected_name, False
+        if mode == "ignore":
+            click = confirmation_prompt(
+                "Ignore {0} permanently?".format(app_name),
+                action="Ignore app",
+                danger=True,
+            )
+            if click:
+                history_manager.update(app_name, "ignored", "user_ignored")
+                print("Ignored.")
+            return selected_name, False
+        if mode == "match" and selected_name:
+            selected_candidate = app_candidates[[c.get("name") for c in app_candidates].index(selected_name)]
+            selected_cask = selected_candidate.get("name", selected_name)
+            click = confirmation_prompt(
+                "Proceed with {0}?".format(selected_cask),
+                action="Install",
+                danger=force,
+            )
+            if not click:
+                continue
+
+            already = is_already_installed(selected_cask, True)
+            if already:
+                print("Already installed: {0}".format(selected_cask))
+                history_manager.update(app_name, "migrated", selected_cask)
+                return selected_name, True
+
+            cmd, success = install_homebrew_package(selected_candidate.get("name", selected_candidate), True, app_name, history_manager, dry_run=dry_run, force=force)
+            if success:
+                history_manager.update(app_name, "migrated", selected_cask)
+                print("Installed: {0}".format(selected_cask))
+            else:
+                print("Install failed: {0}".format(selected_cask))
+            return selected_name, success
 
 
 def main():
-    """Main function to execute the script with argument parsing."""
-    parser = argparse.ArgumentParser(
-        description="Migrate applications in /Applications to Homebrew Casks."
-    )
-    parser.add_argument(
-        "--list-apps",
-        action="store_true",
-        help="List all applications found in /Applications.",
-    )
-    parser.add_argument(
-        "--app", type=str, help="Process a specific application by name."
-    )
-    parser.add_argument(
-        "--reset-history", action="store_true", help="Clear the migration history file."
-    )
-    parser.add_argument(
-        "--batch",
-        action="store_true",
-        help="Run in batch mode, automatically install top match.",
-    )
-    parser.add_argument(
-        "--retry-skipped",
-        action="store_true",
-        help="Retry apps previously skipped due to no cask found.",
-    )
-    parser.add_argument(
-        "--retry-ignored",
-        action="store_true",
-        help="Retry apps previously marked as ignored.",
-    )
-    parser.add_argument(
-        "--list-skipped",
-        action="store_true",
-        help="List apps currently in the skipped history.",
-    )
-    parser.add_argument(
-        "--list-ignored",
-        action="store_true",
-        help="List apps currently in the ignored history.",
-    )
-    parser.add_argument(
-        "--list-installed",
-        action="store_true",
-        help="List all apps successfully migrated to Homebrew.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="Simulate the migration without performing any destructive actions.",
-    )
+    parser = argparse.ArgumentParser(description="Migrate /Applications apps to Homebrew Casks.")
+    parser.add_argument("--list-apps", action="store_true", help="List apps found in /Applications.")
+    parser.add_argument("--app", type=str, help="Process a specific app by name.")
+    parser.add_argument("--reset-history", action="store_true", help="Clear migration history.")
+    parser.add_argument("--plan", action="store_true", default=False, help="Create or update plan without installing.")
+    parser.add_argument("--apply-plan", type=str, default="", help="Install from saved plan.")
+    parser.add_argument("--interactive", action="store_true", help="Direct interactive install mode.")
+    parser.add_argument("--batch", action="store_true", help="Batch mode: install top match automatically.")
+    parser.add_argument("--retry-skipped", action="store_true", help="Retry previously skipped apps.")
+    parser.add_argument("--retry-ignored", action="store_true", help="Retry previously ignored apps.")
+    parser.add_argument("--retry-failed", action="store_true", help="Retry previously failed apps.")
+    parser.add_argument("--list-skipped", action="store_true", help="List skipped apps.")
+    parser.add_argument("--list-ignored", action="store_true", help="List ignored apps.")
+    parser.add_argument("--list-installed", action="store_true", help="List migrated apps.")
+    parser.add_argument("--force", action="store_true", help="Allow brew install with --force. Enable explicitly.")
+    parser.add_argument("--applications-folder", type=str, default=APPLICATIONS_FOLDER, help="Override /Applications path.")
     args = parser.parse_args()
 
-    # Detect listing commands to skip intro
-    listing_requested = any([args.list_apps, args.list_skipped, args.list_ignored, getattr(args, 'list_installed', False)])
+    listing_requested = any([
+        args.list_apps,
+        args.list_skipped,
+        args.list_ignored,
+        getattr(args, "list_installed", False),
+    ])
 
-    if not listing_requested:
-        # Initial screen setup
-        from .ui.console import clear_screen
-        clear_screen()
-        print(CYAN + TITLE_ART + RESET)
-        type_text("INITIALIZING HOMEBREW APP MIGRATOR...\n")
+    plain = False
+    if hasattr(sys.stdout, "isatty") and not sys.stdout.isatty():
+        plain = True
+    if os.environ.get("NO_ANSI") == "1" or os.environ.get("NO_COLOR") == "1":
+        plain = True
+
+    if not plain and not listing_requested:
+        animated_boot(0.8)
+
+    if not check_brew_installed():
+        print("ERROR: HOMEBREW NOT FOUND. ABORT MISSION.")
+        return
+
+    applications_folder = args.applications_folder
+    if not os.path.exists(applications_folder):
+        print("ERROR: {0} NOT FOUND. Use --applications-folder to point elsewhere.".format(applications_folder))
+        return
+    if not plain:
+        print(applications_folder)
 
     history_manager = HistoryManager(HISTORY_PATH)
 
     if args.reset_history:
         if history_manager.clear():
-            retro_print(f"Migration history file '{HISTORY_PATH}' cleared.", GREEN)
+            print("History file '{0}' cleared.".format(HISTORY_PATH))
         else:
-            retro_print("No history file found to clear.", YELLOW)
+            print("No history file found to clear.")
         return
 
-    if not check_brew_installed():
-        retro_print("ERROR: HOMEBREW NOT FOUND. ABORT MISSION.", RED)
-        return
-
-    if not listing_requested:
-        type_text(f"Loaded migration history with {len(history_manager.history)} entries\n")
-
-    if not os.path.exists(APPLICATIONS_FOLDER):
-        retro_print(f"ERROR: {APPLICATIONS_FOLDER} NOT FOUND.", RED)
-        return
-
-    app_names = sorted(
-        [
-            os.path.splitext(app)[0]
-            for app in os.listdir(APPLICATIONS_FOLDER)
-            if app.endswith(".app")
-        ]
-    )
+    app_names = sorted([
+        os.path.splitext(app)[0]
+        for app in os.listdir(applications_folder)
+        if app.endswith(".app")
+    ])
 
     if args.list_apps:
-        display_retro_list("Applications in /Applications", app_names, CYAN)
+        list_apps("Applications in {0}".format(applications_folder), app_names)
         return
 
     if args.list_skipped:
-        skipped_apps = history_manager.get_skipped()
-        display_retro_list("Applications in SKIPPED history", skipped_apps, YELLOW)
+        display_retro_list("Skipped apps", history_manager.get_skipped(), WARN)
         return
 
     if args.list_ignored:
-        ignored_apps = history_manager.get_ignored()
-        display_retro_list("Applications in IGNORED history", ignored_apps, RED)
+        display_retro_list("Ignored apps", history_manager.get_ignored(), BAD)
         return
 
     if args.list_installed:
-        installed_apps = history_manager.get_installed()
-        display_retro_list("Successfully Migrated Applications", installed_apps, GREEN)
+        display_retro_list("Migrated apps", history_manager.get_installed(), GOOD)
         return
 
     apps_to_process = []
@@ -233,53 +347,69 @@ def main():
         entry = history_manager.get(app_name)
         if entry:
             status = entry.get("status")
-            # Migrated is a permanent lock
-            if status.startswith("migrated"):
+            if isinstance(status, str) and status.startswith("migrated"):
                 continue
-
-            # Others depend on flags
             if status == "skipped" and not args.retry_skipped:
                 continue
             if status == "ignored" and not args.retry_ignored:
                 continue
-
+            if status == "failed" and not args.retry_failed:
+                continue
         apps_to_process.append(app_name)
+
+    if args.apply_plan:
+        _apply_plan(args.apply_plan, history_manager, force=args.force)
+        print("History file updated. Goodbye.")
+        return
+
+    interactive_requested = args.interactive
+
+    if not plain and not args.apply_plan:
+        print(title_block())
+        print(welcome_panel(len(app_names), len(history_manager.history), len(history_manager.get_ignored())))
+        print(flow_badge(3))
+
+    if args.plan or (not interactive_requested and not any([
+        args.batch,
+        args.retry_skipped,
+        args.retry_ignored,
+        args.retry_failed,
+    ])):
+        run_plan(apps_to_process, PLAN_PATH)
+        print("History unchanged.")
+        print("To install, run: brew-migrator --apply-plan")
+        return
+
+    if not apps_to_process:
+        print("Nothing to do. All apps already have history.")
+        return
 
     try:
         for app_name in apps_to_process:
-            process_app(app_name, history_manager, batch_mode=args.batch, dry_run=args.dry_run)
-
+            try:
+                process_app(app_name, history_manager, batch_mode=args.batch, dry_run=False, force=args.force)
+            except KeyboardInterrupt:
+                raise
     except KeyboardInterrupt:
-        retro_print("\n\n!!! INTERRUPT SIGNAL RECEIVED !!!", RED)
-        retro_print("SAVING PROGRESS BEFORE EXIT...", YELLOW)
-
+        print("\n\n!!! INTERRUPT SIGNAL RECEIVED !!!")
+        print("SAVING PROGRESS BEFORE EXIT...")
     finally:
-        # History is saved automatically on update, but we call get_summary for the report
-        retro_print("\n" + "=" * 50, YELLOW)
-        type_text("MIGRATION SESSION ENDED. GENERATING REPORT...")
-
+        print()
         newly_migrated, failed, skipped, ignored = history_manager.get_summary(initial_state_history)
 
-        retro_print("\nNEWLY MIGRATED APPLICATIONS:", GREEN)
-        for entry in newly_migrated:
-            retro_print(f"  - {entry}")
-
+        if newly_migrated:
+            display_retro_list("Newly migrated apps", [
+                "{0} -> {1}".format(app, detail)
+                for app, detail in ((entry.split(" -> ")[0], entry.split(" -> ", 1)[1]) for entry in newly_migrated)
+            ], GOOD)
         if failed:
-            retro_print("\nFAILED APPLICATIONS:", RED)
-            for entry in failed:
-                retro_print(f"  - {entry}")
-
+            display_retro_list("Failed apps", failed, BAD)
         if skipped:
-            retro_print("\nSKIPPED APPLICATIONS:", YELLOW)
-            for entry in skipped:
-                retro_print(f"  - {entry}")
-
+            display_retro_list("Skipped apps", skipped, WARN)
         if ignored:
-            retro_print("\nNEWLY IGNORED APPLICATIONS:", RED)
-            for entry in ignored:
-                retro_print(f"  - {entry}")
+            display_retro_list("Newly ignored apps", ignored, BAD)
 
-        retro_print("\nHistory file updated. Goodbye.", CYAN)
+        print("History file updated. Goodbye.")
 
 
 if __name__ == "__main__":

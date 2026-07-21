@@ -4,7 +4,7 @@
 [![Python versions](https://img.shields.io/pypi/pyversions/brew-migrator.svg)](https://pypi.org/project/brew-migrator/)
 [![License](https://img.shields.io/github/license/chriszimbizi/brew-migrator.svg)](https://github.com/chriszimbizi/brew-migrator/blob/main/LICENSE)
 
-A retro-styled CLI tool to migrate manually installed macOS applications from `/Applications` to Homebrew Casks.
+A charm-style terminal tool to migrate manually installed macOS applications from `/Applications` to Homebrew Casks.
 
 ## Why this tool?
 
@@ -20,19 +20,17 @@ Once your apps are migrated to Homebrew Casks using this tool, you can run:
 brew bundle dump
 ```
 
-This generates a `Brewfile` (like [this example](examples/example_brewfile.rb)). This single file is like a "save game" for your entire Mac setup. On a new machine, you just run `brew bundle` and **every single app** is automatically installed for you in minutes.
+This generates a `Brewfile`. This single file is like a "save game" for your entire Mac setup. On a new machine, you just run `brew bundle` and **every single app** is automatically installed for you in minutes.
 
 ## Features
 
-- **Retro UI**: A terminal-based interface that feels like an old-school computer system.
-- **Progress Bar**: Visual feedback during Homebrew operations with a custom pulsing activity bar.
-- **App Ignoring**: Permanently exclude system apps or non-caskable software from future scans.
-- **Multi-Column Layout**: High-density grid-style listing for auditing large application histories.
-- **Intelligent Search**: Automatically finds the correct Homebrew Cask for your installed apps.
-- **Dry Run Mode**: Safe simulation mode to see what would happen without making any changes.
-- **Migration History**: Remembers what you've already migrated, skipped, or failed.
-- **Batch Mode**: Quick-install the best matches for all your apps at once.
-- **Paginated Results**: Easily browse through multiple search results.
+- **Plan by default**: `brew-migrator` now creates a repeatable plan first, installs second.
+- **Single plan per PC**: one plan file in the same folder as history; reruns merge, not overwrite.
+- **Resume from history**: skipped/ignored/failed apps continue later; new apps get matched on reruns.
+- **Charm-style UI**: animated welcome walkthrough, flow badges, rich tables, confirmation prompts for trust actions.
+- **Interactive selection**: inspect candidates, force-install safely, ignore permanently, quit gracefully.
+- **Official tap preference**: prefers `homebrew/cask` candidates when available.
+- **Migration history**: remembers migrated/skipped/ignored/failed so later runs avoid double-work.
 
 ## Installation
 
@@ -44,7 +42,7 @@ Install the latest stable version directly from PyPI:
 pip install brew-migrator
 ```
 
-### From Source (Development)
+### From Source
 
 1. Clone the repository:
 
@@ -59,6 +57,24 @@ pip install brew-migrator
    pip install -e .
    ```
 
+3. Verify the install:
+
+   ```bash
+   brew-migrator --help
+   ```
+
+#### Install directly from the repo without cloning
+
+```bash
+pip install git+https://github.com/chriszimbizi/brew-migrator.git
+```
+
+## Requirements
+
+- macOS with [Homebrew](https://brew.sh/) installed
+- Python 3.10+
+- `pip` that can install `rich`, `questionary`, and `alive-progress`
+
 ## Usage
 
 After installation, you can run the tool using the `brew-migrator` command:
@@ -69,32 +85,47 @@ brew-migrator [OPTIONS]
 
 ### Options
 
-- `--dry-run`: **(Highly Recommended)** Simulate the migration without making any changes.
-- `--list-apps`: List all applications found in your `/Applications` folder.
-- `--list-installed`: List all applications successfully migrated to Homebrew.
-- `--list-skipped`: List all applications currently in the skipped history.
-- `--list-ignored`: List all applications explicitly marked as ignored.
-- `--app "AppName"`: Process a specific application by name.
-- `--batch`: Run in batch mode (automatically install the top match).
-- `--retry-skipped`: Retry apps that were previously skipped.
-- `--retry-ignored`: Re-process apps that were previously marked as ignored.
-- `--reset-history`: Clear the migration history file.
+- `--plan`: Create or update the plan without installing.
+- `--apply-plan <path>`: Install from a saved plan file.
+- `--interactive`: Go straight to interactive installs for this run.
+- `--batch`: Install the best match for every eligible app automatically.
+- `--app "AppName"`: Process one app only.
+- `--list-apps`: List apps found in `/Applications`.
+- `--list-installed`: List migrated apps.
+- `--list-skipped`: List skipped apps.
+- `--list-ignored`: List ignored apps.
+- `--retry-skipped`: Retry skipped apps.
+- `--retry-ignored`: Retry ignored apps.
+- `--retry-failed`: Retry previously failed apps.
+- `--reset-history`: Clear migration history.
+- `--force`: Allow `brew install --cask --force`. Explicit opt-in.
+- `--applications-folder <path>`: Use a custom apps folder.
 
 ### Examples
 
-**Safe Simulation:**
+**Default plan workflow:**
 
 ```bash
-brew-migrator --dry-run
+brew-migrator
 ```
 
-**List all apps:**
+This creates/updates a plan, prints the match table, and stores it in one place.
+
+**Install from plan later:**
+
+```bash
+brew-migrator --apply-plan
+```
+
+If the plan path is omitted, the tool uses the default single-plan file for this PC, or you can pass a saved path explicitly.
+
+**List apps:**
 
 ```bash
 brew-migrator --list-apps
 ```
 
-**Run in batch mode:**
+**Run batch install:**
 
 ```bash
 brew-migrator --batch
@@ -102,10 +133,22 @@ brew-migrator --batch
 
 ## How it Works
 
-1. **Scan**: The tool looks at everything in your `/Applications` folder.
-2. **Search**: It asks Homebrew if there's a corresponding "Cask" for each app.
-3. **Selection**: You choose the correct match from a list (or let Batch Mode handle it).
-4. **Log**: The tool records the migration in a JSON history file to prevent double-work.
+1. **Plan**: the tool reads `/Applications`, finds cask candidates, scores matches, and updates a single plan file for this machine.
+2. **Review**: reruns are safe — history skips already migrated items; unmatched/new apps are picked up automatically.
+3. **Apply**: install with `--apply-plan` or use `--interactive` to confirm one-by-one.
+4. **Remember**: migrated/skipped/ignored/failed states are persisted so future runs resume properly.
+
+## Plan behavior
+- Default mode is plan-first.
+- One plan per PC is maintained automatically: reruns merge updated matches instead of starting over.
+- History is **never** modified in plan mode.
+- If installations fail after applying a plan, rerun `brew-migrator --apply-plan`; migrated apps are skipped automatically and only remaining items retry.
+- New apps installed outside the tool appear on the next `brew-migrator` run and are matched against the current plan/history state.
+
+## Force install opt-in
+- By default, installs use standard cask install.
+- Use `--force` only when you need `--force` semantics from Homebrew.
+- The UI confirms before any force action.
 
 ## Project Structure
 

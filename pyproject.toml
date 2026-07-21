@@ -4,13 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "brew-migrator"
-version = "0.0.2"
+version = "0.0.3"
 description = "Migrate applications from /Applications to Homebrew Casks"
 readme = "README.md"
 requires-python = ">=3.8"
 license = {file = "LICENSE"}
 authors = [
-    {name = "Christopher Zimbizi", email = "chriszimbizi@gmail.com"}
+    {name = "Christopher Zimbizi", email = "chriszimbizi@gmail.com"},
 ]
 keywords = ["homebrew", "mac", "migration", "cask"]
 classifiers = [
@@ -20,11 +20,22 @@ classifiers = [
     "Environment :: Console",
     "Topic :: Utilities",
 ]
+dependencies = [
+    "rich",
+    "questionary",
+    "alive-progress",
+]
+
+[project.optional-dependencies]
+dev = [
+    "build",
+    "twine",
+]
 
 [project.urls]
-Homepage = "https://github.com/chriszimbizi/brew-migrator"
-Repository = "https://github.com/chriszimbizi/brew-migrator"
-"Bug Tracker" = "https://github.com/chriszimbizi/brew-migrator/issues"
+Homepage = "https://github.com/ahmetyilmaz/brew-migrator"
+Repository = "https://github.com/ahmetyilmaz/brew-migrator"
+"Bug Tracker" = "https://github.com/ahmetyilmaz/brew-migrator/issues"
 "Author Website" = "https://www.chriszimbizi.com/"
 
 [project.scripts]
