@@ -466,6 +466,12 @@ def _candidate_css(row: dict) -> str:
     return "[yellow]● unofficial[/yellow]"
 
 
+def _plan_value(app: str, row: Optional[dict]) -> str:
+    if not row:
+        return ""
+    return row.get("cask", "(none)")
+
+
 def _plan_checkbox_label(app: str, row: Optional[dict]) -> str:
     if not row:
         return f"{app} [dim red](no match)[/dim red]"
