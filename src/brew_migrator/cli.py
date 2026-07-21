@@ -42,6 +42,7 @@ from .ui.console import (
     display_dry_run_plan,
     display_retro_list,
     history_table,
+    list_apps,
     load_planned_rows,
     main_menu,
     match_table,
@@ -73,112 +74,216 @@ def match_app(app_name: str) -> List[dict]:
     return get_cask_candidates(app_name)
 
 
+def _format_candidate(app_name: str, cand: dict) -> dict:
+    """Normalise a candidate dict (from get_cask_candidates) into a plan row."""
+    cmd = cand.get("command", [])
+    if isinstance(cmd, list):
+        cmd_str = " ".join(str(p) for p in cmd)
+    else:
+        cmd_str = str(cmd) if cmd else ""
+    return {
+        "app": app_name,
+        "cask": cand.get("name", ""),
+        "score": cand.get("score", 0),
+        "tap": cand.get("tap", ""),
+        "installed": cand.get("installed", ""),
+        "version": cand.get("version", ""),
+        "cmd": cmd_str,
+    }
+
+
+def _auto_match_confidence(candidates: List[dict]) -> bool:
+    """Determine if a set of candidates is a 'high confidence' auto-match."""
+    if not candidates:
+        return False
+    if len(candidates) == 1:
+        return True  # 1-1 match
+    top = candidates[0]
+    top_score = top.get("score", 0)
+    second_score = candidates[1].get("score", 0) if len(candidates) > 1 else 0
+    # High confidence: top score >= 60 and well ahead of second
+    return top_score >= 60 and (top_score - second_score) >= 20
+
+
 def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tuple[str, Optional[dict]]]:
+    """New flow: show all apps → batch-match → review → manual → install.
+
+    Phase 1 – Show every app found.
+    Phase 2 – Batch-match: 1-1 / high-confidence → auto-select; 0 → skip silently.
+    Phase 3 – Present results, ask user if they're satisfied.
+    Phase 4 – Let user manually match remaining (ambiguous) apps.
+    Phase 5 – Return all matched apps for the caller to auto-select + install.
+    """
     app_names = list_app_names(applications_folder)
     if not app_names:
         console.print(trust_banner("No apps found. Override path from the main menu if needed.", kind="danger"))
         return []
     console.print(welcome_panel())
     console.print(f"Apps found: [bold green]{len(app_names)}[/bold green]\n")
-    chosen: Dict[str, Optional[dict]] = {}
-    with console.status("Scanning applications...", spinner="bouncingBall"):
-        time.sleep(0.2)
 
-    for app_name in app_names:
-        candidates = match_app(app_name)
-        selected: Optional[dict] = None
-        if candidates:
-            selected = candidates[0]
-            if questionary is None:
-                console.clear()
-                console.print(title_block())
-                console.print(Panel(_t(f"[bold]{app_name}[/bold]\\nFound {len(candidates)} candidate(s).")))
-                console.print(match_table(app_name, candidates))
-                console.print(preview_panel(app_name, selected))
-                choice = input("Action: [1]install top  [2]pick another  [3]skip  [4]ignore  [q]uit ").strip().lower()
-                if choice.startswith("2"):
-                    idx = input("Pick candidate #: ").strip()
-                    if idx.isdigit():
-                        i = int(idx) - 1
-                        if 0 <= i < len(candidates):
-                            selected = candidates[i]
-                elif choice.startswith("3"):
-                    selected = None
-                elif choice.startswith("4"):
-                    if confirmation_prompt("Ignore this app permanently?", action="Ignore", danger=True):
-                        HISTORY.update(app_name, "ignored", "user_ignored")
-                    chosen[app_name] = None
-                    continue
-                elif choice.startswith("q"):
-                    return [(app, chosen.get(app)) for app in chosen]
+    # Phase 1 — show all apps
+    list_apps("Applications", app_names, count=len(app_names))
+    console.print()
+
+    # Phase 2 — batch match
+    auto_matched: Dict[str, dict] = {}       # app → candidate
+    needs_manual: List[Tuple[str, List[dict]]] = []   # (app, candidates)
+    no_match: List[str] = []                  # apps with 0 candidates
+
+    with console.status("Matching applications to Homebrew Casks...", spinner="bouncingBall"):
+        for app_name in app_names:
+            candidates = match_app(app_name)
+            if not candidates:
+                no_match.append(app_name)
+                continue
+            if _auto_match_confidence(candidates):
+                auto_matched[app_name] = candidates[0]
             else:
-                actions = [
-                    f"✅ Install top match ({selected.get('name', app_name)})",
-                    "🔽 Pick another match",
-                    "⏭ Skip app",
-                    "🚫 Ignore app",
-                    "🚪 Quit",
-                ]
-                console.clear()
-                console.print(title_block())
-                console.print(Panel(_t(f"[bold]{app_name}[/bold]\\nFound {len(candidates)} candidate(s).")))
-                console.print(match_table(app_name, candidates))
-                console.print(preview_panel(app_name, selected))
-                action = questionary.select(
-                    "What to do?",
-                    choices=actions,
-                    qmark="🤖",
-                    style=questionary.Style([("highlighted", "bold cyan")]),
-                ).ask()
-                if action is None:
-                    return [(app, chosen.get(app)) for app in chosen]
-                if "Pick another match" in action:
-                    pick = questionary.select(
-                        "Pick candidate:",
-                        choices=[
-                            questionary.Choice(
-                                title=f"{c.get('name', '?')}  {_candidate_css(c)}  [{c.get('tap','')}]",
-                                value=c,
-                            )
-                            for c in candidates
-                        ],
-                        qmark="🔽",
-                    ).ask()
-                    if pick:
-                        selected = pick
-                elif "Skip app" in action:
-                    selected = None
-                elif "Ignore app" in action:
-                    if confirmation_prompt("Ignore this app permanently?", action="Ignore", danger=True):
-                        HISTORY.update(app_name, "ignored", "user_ignored")
-                    chosen[app_name] = None
-                    continue
-                elif "Quit" in action:
-                    return [(app, chosen.get(app)) for app in chosen]
-        else:
-            console.clear()
-            console.print(Panel(_t(f"[bold]{app_name}[/bold]\\nNo matches found.")))
-            if questionary is not None:
-                action = questionary.select(
-                    "No matches. What to do?",
-                    choices=["Skip app", "Ignore app", "Quit"],
-                    qmark="🤖",
-                    style=questionary.Style([("highlighted", "bold cyan")]),
-                ).ask()
-                if action is None:
-                    return [(app, chosen.get(app)) for app in chosen]
-                if "Ignore app" in action:
-                    if confirmation_prompt("Ignore this app permanently?", action="Ignore", danger=True):
-                        HISTORY.update(app_name, "ignored", "user_ignored")
-                    chosen[app_name] = None
-                    continue
-                if "Quit" in action:
-                    return [(app, chosen.get(app)) for app in chosen]
-            selected = None
+                needs_manual.append((app_name, candidates))
 
-        chosen[app_name] = selected
+    # Phase 3 — present results
+    summary_parts = []
+    if auto_matched:
+        summary_parts.append(f"[bold green]{len(auto_matched)} auto-matched[/bold green]")
+    if needs_manual:
+        summary_parts.append(f"[bold yellow]{len(needs_manual)} need review[/bold yellow]")
+    if no_match:
+        summary_parts.append(f"[dim]{len(no_match)} no cask found (skipped)[/dim]")
+    if summary_parts:
+        console.print(Panel(_t("  •  ".join(summary_parts)), border_style="cyan"))
+
+    if auto_matched:
+        console.print("\n[bold]Auto-matched apps:[/bold]")
+        for app, cand in sorted(auto_matched.items()):
+            console.print(
+                _t(f"  [cyan]{app}[/cyan] → [green]{cand['name']}[/green]  "
+                   f"[dim](score: {cand.get('score', 0)}, "
+                   f"{'official' if cand.get('tap','').lower().startswith('homebrew/') else 'unofficial'})[/dim]")
+            )
+
+    if needs_manual:
+        console.print(f"\n[bold yellow]Apps needing manual match:[/bold yellow]")
+        for app, _cands in needs_manual:
+            console.print(_t(f"  [yellow]{app}[/yellow]"))
+
+    console.print()
+
+    # Ask user if they're satisfied with auto-matches
+    if auto_matched and needs_manual:
+        satisfied = confirmation_prompt(
+            "Auto-matched some apps. Satisfied or manually review everything?",
+            action="Satisfied",
+            danger=False,
+        )
+    elif auto_matched:
+        satisfied = confirmation_prompt(
+            "All apps matched automatically. Satisfied or manually review?",
+            action="Satisfied",
+            danger=False,
+        )
+    else:
+        satisfied = True
+
+    if not satisfied:
+        # Move all auto-matched to manual review so user can pick
+        for app, cand in auto_matched.items():
+            candidates = match_app(app)
+            if candidates:
+                needs_manual.append((app, candidates))
+        auto_matched = {}
+        console.print(_t("[yellow]All matches moved to manual review.[/yellow]"))
+
+    # Phase 4 — manual matching
+    if needs_manual:
+        if questionary is None:
+            _manual_match_fallback(needs_manual, auto_matched)
+        else:
+            _manual_match_tui(needs_manual, auto_matched)
+
+    return [(app, auto_matched[app]) for app in sorted(auto_matched.keys())]
+
+
+def _manual_match_fallback(
+    needs_manual: List[Tuple[str, List[dict]]],
+    results: Dict[str, dict],
+) -> None:
+    """Manual matching via plain input() when questionary is absent."""
+    console.print("\n[bold yellow]--- Manual matching (no TUI) ---[/bold yellow]")
+    for app_name, candidates in needs_manual:
+        console.clear()
+        console.print(title_block())
+        console.print(Panel(_t(f"[bold]{app_name}[/bold]\nFound {len(candidates)} candidate(s).")))
+        console.print(match_table(app_name, candidates))
+        top = candidates[0]
+        console.print(preview_panel(app_name, top))
+        choice = input("Action: [1]accept top match  [2]pick another  [s]skip [q]uit ").strip().lower()
+        selected = None
+        if choice.startswith("2"):
+            idx = input("Pick candidate #: ").strip()
+            if idx.isdigit():
+                i = int(idx) - 1
+                if 0 <= i < len(candidates):
+                    selected = candidates[i]
+        elif choice.startswith("s"):
+            continue
+        elif choice.startswith("q"):
+            break
+        elif choice.startswith("1") or not choice:
+            selected = top
+        if selected:
+            results[app_name] = selected
+
+
+def _manual_match_tui(
+    needs_manual: List[Tuple[str, List[dict]]],
+    results: Dict[str, dict],
+) -> None:
+    """Manual matching via questionary TUI."""
+    for app_name, candidates in needs_manual:
+        top = candidates[0]
+        actions = [
+            f"✅ Accept top match ({top.get('name', app_name)})",
+            "🔽 Pick another match",
+            "⏭ Skip this app",
+            "🚪 Quit matching",
+        ]
+        console.clear()
+        console.print(title_block())
+        console.print(Panel(
+            _t(f"[bold]{app_name}[/bold]\nFound [green]{len(candidates)}[/green] candidate(s)."),
+            border_style="cyan",
+        ))
+        console.print(match_table(app_name, candidates))
+        console.print(preview_panel(app_name, top))
+        action = questionary.select(
+            "What to do?",
+            choices=actions,
+            qmark="🤖",
+            style=questionary.Style([("highlighted", "bold cyan")]),
+        ).ask()
+        if action is None or "Quit matching" in action:
+            break
+        elif "Pick another match" in action:
+            pick = questionary.select(
+                "Pick candidate:",
+                choices=[
+                    questionary.Choice(
+                        title=f"{c.get('name', '?')}  {_candidate_css(c)}  [{c.get('tap','')}]",
+                        value=c,
+                    )
+                    for c in candidates
+                ],
+                qmark="🔽",
+            ).ask()
+            if pick:
+                results[app_name] = pick
+            else:
+                continue
+        elif "Skip this app" in action:
+            continue
+        else:
+            results[app_name] = top
         time.sleep(0.05)
-    return [(app, chosen.get(app)) for app in sorted(chosen.keys())]
 
 
 def review_and_select(planned: List[Tuple[str, Optional[dict]]]) -> List[Tuple[str, Optional[dict]]]:
@@ -234,13 +339,17 @@ def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
             return
         if mode == "scan":
             current_planned = interactive_scan(folder)
-            to_save = [(app, row) for app, row in current_planned if row and row.get("cask")]
-            upsert_planned_rows(to_save, PLAN_PATH)
-            current_planned = review_and_select(current_planned)
-            to_save = current_planned
-            upsert_planned_rows(to_save, PLAN_PATH)
+            # Normalise and save
+            normed = []
+            for app, cand in current_planned:
+                if cand and cand.get("name"):
+                    normed.append((app, _format_candidate(app, cand)))
+            upsert_planned_rows(normed, PLAN_PATH)
+            # Review checkbox
+            reviewed = review_and_select(normed)
+            upsert_planned_rows(reviewed, PLAN_PATH)
             if confirmation_prompt("Install selected now?", action="Install", danger=False):
-                apply_selected(current_planned)
+                apply_selected(reviewed)
             continue
         if mode == "install":
             plan_rows = merge_planned_rows(load_planned_rows())
