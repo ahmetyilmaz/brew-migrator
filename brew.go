@@ -57,7 +57,79 @@ func historyPath() string {
 	return filepath.Join(homeDir(), ".brew_migrator_history")
 }
 
-// ── Brew detection ────────────────────────────────────────────────────────
+// ── Brew list (installed casks cache) ──────────────────────
+
+var (
+	installedCasksMap   map[string]bool
+	installedCasksMu    sync.Mutex
+	installedCasksLoaded bool
+)
+
+// loadInstalledCasks fetches all installed casks once and caches them in a map.
+// Subsequent calls are no-ops. Returns the map for convenience.
+func loadInstalledCasks() map[string]bool {
+	installedCasksMu.Lock()
+	defer installedCasksMu.Unlock()
+	if installedCasksLoaded {
+		return installedCasksMap
+	}
+	installedCasksMap = make(map[string]bool)
+	out, err := runBrew("list", "--cask", "--full-name")
+	if err != nil {
+		installedCasksLoaded = true
+		return installedCasksMap
+	}
+	for _, name := range strings.Fields(out) {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		// Store normalized version (strip spaces/hyphens/underscores)
+		// so lookup via normalizeCaskName() matches correctly
+		if idx := strings.LastIndex(name, "/"); idx >= 0 {
+			short := name[idx+1:]
+			installedCasksMap[normalizeCaskName(short)] = true
+		}
+		installedCasksMap[normalizeCaskName(name)] = true
+	}
+	installedCasksLoaded = true
+	return installedCasksMap
+}
+
+// isInstalledFast checks the in-memory map; no shell call.
+func isInstalledFast(caskName string) bool {
+	installedCasksMu.Lock()
+	defer installedCasksMu.Unlock()
+	if installedCasksMap == nil {
+		return false
+	}
+	return installedCasksMap[caskName]
+}
+
+// fastMatchInstalled checks if the app name (normalized) directly matches
+// an installed cask. Returns a Candidate if found, nil otherwise.
+func fastMatchInstalled(appName string) *Candidate {
+	normalized := normalizeCaskName(appName)
+	if normalized == "" {
+		return nil
+	}
+	if !isInstalledFast(normalized) {
+		return nil
+	}
+	return &Candidate{
+		Name:      normalized,
+		Score:     100,
+		Installed: true,
+	}
+}
+
+func normalizeCaskName(name string) string {
+	s := strings.ToLower(strings.TrimSpace(name))
+	s = strings.ReplaceAll(s, " ", "")
+	s = strings.ReplaceAll(s, "_", "")
+	s = strings.ReplaceAll(s, "-", "")
+	return s
+}
 
 func checkBrewInstalled() bool {
 	return exec.Command("brew", "--version").Run() == nil
@@ -232,6 +304,11 @@ func parseBrewInfo(infoText string) map[string]brewCaskInfo {
 }
 
 func getCaskCandidates(appName string) []Candidate {
+	// Fast path: check if app is already installed as a cask
+	if c := fastMatchInstalled(appName); c != nil {
+		return []Candidate{*c}
+	}
+
 	names := searchCasks(appName)
 	if len(names) == 0 {
 		return nil
@@ -306,8 +383,12 @@ func getCaskCandidates(appName string) []Candidate {
 
 // ── Install ───────────────────────────────────────────────────────────────
 
+// isAlreadyInstalled checks brew; falls back to in-memory cache if loaded.
 func isAlreadyInstalled(pkg string) bool {
-	return exec.Command("brew", "list", "--cask", pkg).Run() == nil
+	if isInstalledFast(pkg) {
+		return true
+	}
+	return exec.Command("brew", "list", "--cask", "--full-name", pkg).Run() == nil
 }
 
 func installCask(name string) (bool, string) {

@@ -400,6 +400,9 @@ func (m *model) startScan() tea.Cmd {
 	m.scanDone = false
 	m.scanCurrent = 0
 
+	// Phase 1: load installed casks into memory (fast, one brew call)
+	loadInstalledCasks()
+
 	appNames := scanApplications("/Applications")
 	m.scanApps = make([]AppInfo, len(appNames))
 	for i, name := range appNames {
@@ -468,6 +471,18 @@ func (m *model) updateScanning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// scanInstalledCount returns how many scanned apps were fast-matched (score == 100)
+// to an already-installed cask.
+func scanInstalledCount(apps []AppInfo) int {
+	n := 0
+	for _, a := range apps {
+		if a.Score == 100 {
+			n++
+		}
+	}
+	return n
+}
+
 func (m *model) renderScanning() string {
 	var b strings.Builder
 
@@ -478,9 +493,10 @@ func (m *model) renderScanning() string {
 
 	b.WriteString(fmt.Sprintf("    %s\n\n",
 		lipgloss.NewStyle().Foreground(lipgloss.Color(colorTextDim)).
-			Render(fmt.Sprintf("matched %d / %d apps  •  %s",
+			Render(fmt.Sprintf("matched %d / %d apps  •  %s  •  %d from installed casks",
 				m.scanCurrent, m.scanTotal,
-				m.spinner.View()))))
+				m.spinner.View(),
+				scanInstalledCount(m.scanApps)))))
 
 	// ── Rows ──
 	// Column headers
