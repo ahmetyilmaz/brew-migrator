@@ -13,6 +13,9 @@ import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 
+from rich.panel import Panel
+from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+
 from .core.history import HistoryManager, HISTORY_PATH
 from .core.brew import (
     get_cask_candidates,
@@ -35,6 +38,7 @@ from .ui.console import (
     display_dry_run_plan,
     display_retro_list,
     history_table,
+    load_planned_rows,
     main_menu,
     merge_planned_rows,
     plan_table,
