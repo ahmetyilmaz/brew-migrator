@@ -329,6 +329,47 @@ def match_table(title: str, matches: Sequence[dict], start_idx: int = 0, page_si
     return Panel(table, title=title, border_style="green", box=HEAVY_EDGE)
 
 
+def format_dry_run_candidates(
+    app_candidates: Sequence[dict],
+) -> List[dict]:
+    """Mapcask candidate dicts from ``core.brew`` into the plan-table shape
+    used by ``cli._build_planned_rows`` and ``cli.process_app``."""
+    scored: List[dict] = []
+    for c in app_candidates:
+        if not isinstance(c, dict):
+            continue
+        cm = c.get("command")
+        if isinstance(cm, list):
+            cmd = " ".join(str(part) for part in cm)
+        else:
+            cmd = str(c.get("command", ""))
+        scored.append(
+            {
+                "cask": c.get("name", ""),
+                "score": c.get("score", 0),
+                "tap": c.get("tap", ""),
+                "installed": c.get("installed", ""),
+                "version": c.get("version", ""),
+                "cmd": cmd,
+            }
+        )
+    scored.sort(key=lambda row: row.get("score", 0), reverse=True)
+    return scored
+
+
+def _write_dry_run_plan(
+    title: str,
+    planned_rows: Sequence[Tuple[str, dict]],
+    export_path: str = "",
+) -> None:
+    """Compatibility shim for the original dry-run writer. The current plan
+    path is handled by ``cli._update_plan`` / ``cli.run_plan``, so this
+    intentionally does not write files. The name is kept so ``cli.py``
+    imports resolve when the legacy UI flag is not wired in."""
+    del title, planned_rows, export_path
+    return None
+
+
 def ask_match(title: str, matches: Sequence[dict], start_idx: int = 0) -> Tuple[str, Optional[str]]:
     action = "match"
     while True:
