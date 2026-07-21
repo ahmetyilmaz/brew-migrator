@@ -6,7 +6,7 @@ from datetime import datetime
 
 import argparse
 
-from .history import HistoryManager, HISTORY_PATH
+from .core.history import HistoryManager, HISTORY_PATH
 from .core.brew import (
     find_matches,
     is_already_installed,
