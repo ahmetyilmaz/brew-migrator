@@ -66,9 +66,7 @@ def match_app(app_name: str) -> List[dict]:
 def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tuple[str, Optional[dict]]]:
     app_names = list_app_names(applications_folder)
     if not app_names:
-        console.print(
-            trust_banner("No apps found. Override with --folder if needed.", kind="danger")
-        )
+        console.print(trust_banner("No apps found. Override path from the main menu if needed.", kind="danger"))
         return []
     console.print(welcome_panel())
     console.print(f"Apps found: [bold green]{len(app_names)}[/bold green]\n")
@@ -81,40 +79,39 @@ def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tu
         selected: Optional[dict] = None
         if candidates:
             selected = candidates[0]
-            actions = [
-                f"✅ Install top match ({selected.get('name', app_name)})",
-                "🔽 Pick another match",
-                "⏭ Skip app",
-                "🚫 Ignore app",
-                "🚪 Quit",
-            ]
-            fallback = "✅ Install top match"
             if questionary is None:
                 console.clear()
                 console.print(title_block())
-                console.print(Panel.from_markup(f"**{app_name}**\nFound {len(candidates)} candidate(s)."), style=BRAND)
+                console.print(Panel.from_markup(f"**{app_name}**\nFound {len(candidates)} candidate(s)."))
                 console.print(match_table(app_name, candidates))
-                choice = input("Action: ").strip().lower()
-                if "install" in choice or choice == "1":
-                    selected = selected
-                elif "pick" in choice or choice == "2":
+                console.print(preview_panel(app_name, selected))
+                choice = input("Action: [1]install top  [2]pick another  [3]skip  [4]ignore  [q]uit ").strip().lower()
+                if choice.startswith("2"):
                     idx = input("Pick candidate #: ").strip()
                     if idx.isdigit():
                         i = int(idx) - 1
                         if 0 <= i < len(candidates):
                             selected = candidates[i]
-                elif "skip" in choice or choice == "3":
+                elif choice.startswith("3"):
                     selected = None
-                elif "ignore" in choice or choice == "4":
-                    HISTORY.update(app_name, "ignored", "user_ignored")
+                elif choice.startswith("4"):
+                    if confirmation_prompt("Ignore this app permanently?", action="Ignore", danger=True):
+                        HISTORY.update(app_name, "ignored", "user_ignored")
                     chosen[app_name] = None
                     continue
-                elif "quit" in choice or choice == "5":
+                elif choice.startswith("q"):
                     return [(app, chosen.get(app)) for app in chosen]
             else:
+                actions = [
+                    f"✅ Install top match ({selected.get('name', app_name)})",
+                    "🔽 Pick another match",
+                    "⏭ Skip app",
+                    "🚫 Ignore app",
+                    "🚪 Quit",
+                ]
                 console.clear()
                 console.print(title_block())
-                console.print(Panel.from_markup(f"**{app_name}**\nFound [green]{len(candidates)}[/green] candidate(s)."), style=BRAND)
+                console.print(Panel.from_markup(f"**{app_name}**\nFound [green]{len(candidates)}[/green] candidate(s)."))
                 console.print(match_table(app_name, candidates))
                 console.print(preview_panel(app_name, selected))
                 action = questionary.select(
@@ -150,7 +147,7 @@ def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tu
                     return [(app, chosen.get(app)) for app in chosen]
         else:
             console.clear()
-            console.print(Panel.from_markup(f"**{app_name}**\nNo matches found."), style=BAD)
+            console.print(Panel.from_markup(f"**{app_name}**\nNo matches found."))
             if questionary is not None:
                 action = questionary.select(
                     "No matches. What to do?",
@@ -179,7 +176,7 @@ def review_and_select(planned: List[Tuple[str, Optional[dict]]]) -> List[Tuple[s
         return planned
     console.clear()
     console.print(title_block())
-    console.print(Panel("Review your selections.\nAutoselected top matches where available.\nDeselect anything you don't want installed.", style=BRAND))
+    console.print(Panel("Review your selections.\nAutoselected top matches where available.\nDeselect anything you don't want installed."))
     if questionary is None:
         return planned
     checkbox_choices = [
@@ -207,12 +204,12 @@ def review_and_select(planned: List[Tuple[str, Optional[dict]]]) -> List[Tuple[s
 
 def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
     if not check_brew_installed():
-        console.print(Panel("Homebrew is not installed or not on PATH.\nInstall from https://brew.sh and try again.", style=BAD))
+        console.print(Panel("Homebrew is not installed or not on PATH.\nInstall from https://brew.sh and try again.", title="Homebrew required"))
         return
 
     folder = os.path.expanduser(folder)
     if not os.path.isdir(folder):
-        console.print(Panel(f"Folder not found: {folder}\nUse another path from the main menu.", style=BAD))
+        console.print(Panel(f"Folder not found: {folder}\nUse another path from the main menu.", title="Folder missing"))
         return
 
     animated_boot(0.6)
@@ -221,8 +218,9 @@ def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
         plan_rows = load_planned_rows()
         history_count = len(HISTORY.history)
         mode = main_menu(plan_size=len(plan_rows), history_size=history_count)
+
         if mode == "quit":
-            console.print(Panel("See you soon!", style=BRAND))
+            console.print(Panel("See you soon!"))
             return
         if mode == "scan":
             current_planned = interactive_scan(folder)
@@ -237,7 +235,7 @@ def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
         if mode == "install":
             plan_rows = merge_planned_rows(load_planned_rows())
             if not plan_rows:
-                console.print(Panel("Plan is empty. Scan & Plan first.", style=WARN))
+                console.print(Panel("Plan is empty. Scan & Plan first."))
                 continue
             apply_selected(plan_rows)
             continue
@@ -246,14 +244,13 @@ def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
             continue
         if mode == "retry":
             plan_rows = merge_planned_rows(load_planned_rows())
-            retry_plan = []
-            for app, row in plan_rows:
-                entry = HISTORY.get(app)
-                status = entry.get("status", "") if isinstance(entry, dict) else ""
-                if status in {"failed", "skipped"}:
-                    retry_plan.append((app, row))
+            retry_plan = [
+                (app, row)
+                for app, row in plan_rows
+                if isinstance(HISTORY.get(app), dict) and HISTORY.get(app).get("status") in {"failed", "skipped"}
+            ]
             if not retry_plan:
-                console.print(Panel("Nothing to retry.", style=BRAND))
+                console.print(Panel("Nothing to retry."))
                 continue
             apply_selected(retry_plan)
             continue
@@ -261,7 +258,7 @@ def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
 
 def apply_selected(planned: List[Tuple[str, Optional[dict]]]) -> bool:
     console.clear()
-    console.print(Panel.from_markup(f"Selected installs: [green]{sum(1 for _, r in planned if r and r.get('cask'))}[/green]", title=" ", style=BRAND))
+    console.print(Panel.from_markup(f"Selected installs: [green]{sum(1 for _, r in planned if r and r.get('cask'))}[/green]"))
     console.print(plan_table(planned))
     console.print()
     if not confirmation_prompt("Begin install?", action="Install", danger=False):
@@ -319,7 +316,7 @@ def apply_selected(planned: List[Tuple[str, Optional[dict]]]) -> bool:
     return not failures
 
 
-def install_flow(app_name: str, candidate: dict, *, history_manager: "HistoryManager") -> bool:
+def install_flow(app_name: str, candidate: dict, *, history_manager: HistoryManager) -> bool:
     name = candidate.get("name", app_name)
     console.print(_t(f":hourglass:  Installing [bold]{name}[/bold]..."), style=BRAND)
     _, ok = install_homebrew_package(
@@ -343,7 +340,6 @@ def show_history(history: Dict[str, dict] = None) -> None:
     console.print(title_block())
     choices = ["All", "Migrated", "Failed", "Skipped", "Ignored", "Back"]
     if questionary is None:
-        # None fallback: print table raw and return
         console.print(history_table(history))
         return
     while True:
@@ -377,7 +373,7 @@ def main() -> None:
         run_flow()
     except KeyboardInterrupt:
         console.print("\nBye!")
-    except Exception as exc:  # pragma: no cover
+    except Exception as exc:
         console.print(Panel(f"{type(exc).__name__}: {exc}", title="Error", style=BAD))
         sys.exit(1)
 

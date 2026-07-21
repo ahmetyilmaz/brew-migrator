@@ -149,7 +149,7 @@ def welcome_panel() -> Panel:
             "Welcome to **Brew Migrator**.",
             "",
             "- Scan **/Applications** for `.app` bundles",
-            "- Match every app to best Homebrew Casks",
+            "- Match every app to Homebrew Casks",
             "- Autoselect top matches, review in bulk, then install",
             "- Browse history and retry failures",
             "",
@@ -346,7 +346,7 @@ def display_dry_run_plan(
         ) else "no"
         table.add_row(
             app,
-            row.get("cask", ""),
+            row.get("cask", "(none)"),
             str(row.get("score", "")),
             official,
             row.get("installed", ""),
@@ -448,7 +448,7 @@ def upsert_planned_rows(rows: List[Tuple[str, dict]], plan_path: Path = PLAN_PAT
 
 
 # ---------------------------------------------------------------------------
-# TUI flow
+# TUI helpers
 # ---------------------------------------------------------------------------
 
 def _candidate_css(row: dict) -> str:
@@ -460,38 +460,24 @@ def _candidate_css(row: dict) -> str:
     if installed:
         return "[green]● installed[/green]"
     if score >= 40 and official:
-        return "[bold green]● top official[/bold green]"
+        return "[bold green]● top[/bold green]"
     if official:
         return "[green]● official[/green]"
     return "[yellow]● unofficial[/yellow]"
 
 
-def _plan_value(app: str, row: Optional[dict]) -> str:
-    if not row:
-        return ""
-    return row.get("cask", "(none)")
-
-
 def _plan_checkbox_label(app: str, row: Optional[dict]) -> str:
     if not row:
         return f"{app} [dim red](no match)[/dim red]"
-    label = _plan_value(app, row)
+    label = row.get("cask", "(none)")
     css = _candidate_css(row)
     return f"{app}  →  {label}  {css}"
 
 
 def main_menu(plan_size: int = 0, history_size: int = 0) -> str:
     console.clear()
-    console.print(
-        Align.center(
-            Text("🍺  Brew Migrator", style="bold cyan"),
-        )
-    )
-    console.print(
-        Align.center(
-            Text("scan  →  match  →  select  →  install", style=MUTED),
-        )
-    )
+    console.print(Align.center(Text("🍺  Brew Migrator", style="bold cyan")))
+    console.print(Align.center(Text("scan  →  match  →  select  →  install", style=MUTED)))
     console.print()
     choices = [
         questionary.Choice(
@@ -543,7 +529,7 @@ def main_menu(plan_size: int = 0, history_size: int = 0) -> str:
 
 
 # ---------------------------------------------------------------------------
-# History / plan helpers used by the TUI
+# History / plan tables used by the TUI
 # ---------------------------------------------------------------------------
 
 def history_table(history: Dict[str, dict]) -> Table:
