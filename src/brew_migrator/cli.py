@@ -17,6 +17,7 @@ from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
 from rich.table import Table
 from rich.box import ROUNDED
+from rich.live import Live
 
 from .core.history import HistoryManager, HISTORY_PATH
 from .core.brew import (
@@ -33,7 +34,6 @@ from .ui.console import (
     _APPLICATIONS_FOLDER,
     _candidate_css,
     _load_plan,
-    _plan_checkbox_label,
     _plan_value,
     _t,
     _use_colors,
@@ -93,265 +93,154 @@ def _format_candidate(app_name: str, cand: dict) -> dict:
     }
 
 
-def _auto_match_confidence(candidates: List[dict]) -> bool:
-    """Determine if a set of candidates is a 'high confidence' auto-match."""
-    if not candidates:
-        return False
-    if len(candidates) == 1:
-        return True  # 1-1 match
-    top = candidates[0]
-    top_score = top.get("score", 0)
-    second_score = candidates[1].get("score", 0) if len(candidates) > 1 else 0
-    # High confidence: top score >= 60 and well ahead of second
-    return top_score >= 60 and (top_score - second_score) >= 20
+def _quality_label(score: int) -> str:
+    """Rich-markup quality indicator based on match score."""
+    if score > 90:
+        return "[bold green]⭐ near perfect[/bold green]"
+    elif score >= 50:
+        return "[yellow]🤔 maybe[/yellow]"
+    else:
+        return "[red]❓ questionable[/red]"
+
+
+def _quality_plain(score: int) -> str:
+    """Plain-text quality label for questionary titles (no rich markup)."""
+    if score > 90:
+        return "⭐ near perfect"
+    elif score >= 50:
+        return "🤔 maybe"
+    else:
+        return "❓ questionable"
 
 
 def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tuple[str, Optional[dict]]]:
-    """Batch-match apps and let user review before install.
+    """Live-scan apps with real-time table, then interactive checkbox selection.
 
-    Shows welcome, matches every app in one pass (1-1 / high-confidence →
-    auto-select; 0 candidates → skip silently), then presents a consolidated
-    table of all results. User can approve auto-matches or move everything
-    to manual review. Then runs the manual-matching TUI for ambiguous apps.
-    All matched apps are returned for the caller to checkbox-review + install.
+    Shows a single Rich Live table that updates as each app is matched:
+      score > 90  → ⭐ near perfect  (auto-selected, checkbox pre-checked)
+      score 50–90 → 🤔 maybe         (checkbox unchecked)
+      score < 50  → ❓ questionable   (checkbox unchecked)
+      no match    → ⏭ skipped        (disabled in checkbox)
+
+    After scanning, a questionary.checkbox() lets the user review and toggle
+    selections with ↓↑ + space, then returns only the checked items.
     """
     app_names = list_app_names(applications_folder)
     if not app_names:
         console.print(trust_banner("No apps found. Override path from the main menu if needed.", kind="danger"))
         return []
+
     console.print(welcome_panel())
     console.print(_t(f"[bold green]{len(app_names)}[/bold green] applications found\n"))
 
-    # Pre-scanning page: show all apps in a table
-    app_table = Table(
-        title=_t("[bold]Applications[/bold]"),
-        box=ROUNDED,
-        expand=False,
-        show_header=False,
-        border_style="cyan",
-    )
-    # Split into 3 columns for density
-    n = len(app_names)
-    chunk = (n + 2) // 3
-    cols = [app_names[i:i+chunk] for i in range(0, n, chunk)]
-    for _ in range(3):
-        app_table.add_column(style="cyan", no_wrap=True)
-    max_rows = max(len(c) for c in cols)
-    for i in range(max_rows):
-        row = []
-        for c in cols:
-            row.append(c[i] if i < len(c) else "")
-        app_table.add_row(*row)
-    console.print(app_table)
-    console.print()
+    # Live-match state
+    matched: Dict[str, Optional[dict]] = {}   # app → candidate (or None if skipped)
+    quality: Dict[str, str] = {}              # app → rich-markup quality label
+    score_val: Dict[str, int] = {}            # app → numeric score
 
-    # Batch match
-    auto_matched: Dict[str, dict] = {}       # app → candidate
-    needs_manual: List[Tuple[str, List[dict]]] = []   # (app, candidates)
-    no_match: List[str] = []                  # apps with 0 candidates
+    def _build_scan_table() -> Table:
+        matched_count = sum(1 for v in matched.values() if v is not None)
+        skipped_count = sum(1 for v in matched.values() if v is None)
+        scanning_count = len(app_names) - len(matched)
+        t = Table(
+            title=_t("[bold]Matching Applications[/bold]"),
+            box=ROUNDED,
+            expand=True,
+            caption=_t(f"[dim]{matched_count} matched  •  "
+                       f"{skipped_count} skipped  •  "
+                       f"{scanning_count} scanning[/dim]"),
+        )
+        t.add_column("#", style="dim", width=4)
+        t.add_column("App", style="bold cyan", no_wrap=True)
+        t.add_column("Cask", style="white")
+        t.add_column("Score", justify="right", style="green", width=6)
+        t.add_column("Quality", style="bold")
+        t.add_column("Sel", justify="center", width=5)
 
-    with console.status("Matching applications to Homebrew Casks...", spinner="bouncingBall"):
+        for i, app in enumerate(app_names, 1):
+            if app in matched:
+                cand = matched[app]
+                if cand is None:
+                    t.add_row(str(i), app, "[dim]—[/dim]", "[dim]—[/dim]", "[dim]⏭ skipped[/dim]", "[dim]—[/dim]")
+                else:
+                    t.add_row(
+                        str(i), app,
+                        cand.get("name", ""),
+                        str(score_val.get(app, 0)),
+                        quality.get(app, ""),
+                        "[green]✓[/green]" if score_val.get(app, 0) > 90 else "○",
+                    )
+            else:
+                t.add_row(str(i), app, "[dim]⏳[/dim]", "[dim]—[/dim]", "[dim]⏳[/dim]", "[dim]⏳[/dim]")
+        return t
+
+    # Phase 1 — live matching
+    with Live(console=console, refresh_per_second=4, vertical_overflow="visible") as live:
+        live.update(_build_scan_table())
         for app_name in app_names:
             candidates = match_app(app_name)
             if not candidates:
-                no_match.append(app_name)
-                continue
-            if _auto_match_confidence(candidates):
-                auto_matched[app_name] = candidates[0]
+                matched[app_name] = None
+                quality[app_name] = "[dim]⏭ skipped[/dim]"
+                score_val[app_name] = 0
             else:
-                needs_manual.append((app_name, candidates))
+                best = candidates[0]
+                matched[app_name] = best
+                s = best.get("score", 0)
+                score_val[app_name] = s
+                quality[app_name] = _quality_label(s)
+            live.update(_build_scan_table())
+            time.sleep(0.02)
 
-    # Phase 3 — present results in a consolidated table
-    if auto_matched or needs_manual or no_match:
-        results_table = Table(
-            title=_t("[bold]Match Results[/bold]"),
-            box=ROUNDED,
-            expand=True,
-            caption=_t(f"[dim]{len(auto_matched)} auto-matched  •  "
-                       f"{len(needs_manual)} need review  •  "
-                       f"{len(no_match)} no cask found[/dim]"),
-        )
-        results_table.add_column("App", style="bold cyan", no_wrap=True)
-        results_table.add_column("Cask", style="white")
-        results_table.add_column("Score", justify="right", style="green", width=6)
-        results_table.add_column("Source", style="magenta")
-        results_table.add_column("Status", style="bold")
+    console.print()  # breathing room after Live table
 
-        for app in sorted(app_names):
-            if app in auto_matched:
-                cand = auto_matched[app]
-                official = "official" if cand.get("tap", "").lower().startswith("homebrew/") else "third-party"
-                results_table.add_row(
-                    app,
-                    cand.get("name", ""),
-                    str(cand.get("score", 0)),
-                    official,
-                    "[green]✓ auto[/green]",
-                )
-            elif any(a == app for a, _ in needs_manual):
-                results_table.add_row(
-                    app,
-                    "[dim]—[/dim]",
-                    "[dim]—[/dim]",
-                    "[dim]—[/dim]",
-                    "[yellow]⏳ manual[/yellow]",
-                )
-            elif app in no_match:
-                results_table.add_row(
-                    app,
-                    "[dim]—[/dim]",
-                    "[dim]—[/dim]",
-                    "[dim]—[/dim]",
-                    "[dim]⏭ skipped[/dim]",
-                )
-        console.print(results_table)
-
-    # Ask user if they're satisfied with auto-matches
-    if auto_matched and needs_manual:
-        satisfied = confirmation_prompt(
-            "Auto-matched some apps. Satisfied or manually review everything?",
-            action="Satisfied",
-            danger=False,
-        )
-    elif auto_matched:
-        satisfied = confirmation_prompt(
-            "All apps matched automatically. Satisfied or manually review?",
-            action="Satisfied",
-            danger=False,
-        )
-    else:
-        satisfied = True
-
-    if not satisfied:
-        # Move all auto-matched to manual review so user can pick
-        for app, cand in auto_matched.items():
-            candidates = match_app(app)
-            if candidates:
-                needs_manual.append((app, candidates))
-        auto_matched = {}
-        console.print(_t("[yellow]All matches moved to manual review.[/yellow]"))
-
-    # Phase 4 — manual matching
-    if needs_manual:
-        if questionary is None:
-            _manual_match_fallback(needs_manual, auto_matched)
-        else:
-            _manual_match_tui(needs_manual, auto_matched)
-
-    return [(app, auto_matched[app]) for app in sorted(auto_matched.keys())]
-
-
-def _manual_match_fallback(
-    needs_manual: List[Tuple[str, List[dict]]],
-    results: Dict[str, dict],
-) -> None:
-    """Manual matching via plain input() when questionary is absent."""
-    console.print("\n[bold yellow]--- Manual matching (no TUI) ---[/bold yellow]")
-    for app_name, candidates in needs_manual:
-        console.clear()
-        console.print(title_block())
-        console.print(Panel(_t(f"[bold]{app_name}[/bold]\nFound {len(candidates)} candidate(s).")))
-        console.print(match_table(app_name, candidates))
-        top = candidates[0]
-        console.print(preview_panel(app_name, top))
-        choice = input("Action: [1]accept top match  [2]pick another  [s]skip [q]uit ").strip().lower()
-        selected = None
-        if choice.startswith("2"):
-            idx = input("Pick candidate #: ").strip()
-            if idx.isdigit():
-                i = int(idx) - 1
-                if 0 <= i < len(candidates):
-                    selected = candidates[i]
-        elif choice.startswith("s"):
-            continue
-        elif choice.startswith("q"):
-            break
-        elif choice.startswith("1") or not choice:
-            selected = top
-        if selected:
-            results[app_name] = selected
-
-
-def _manual_match_tui(
-    needs_manual: List[Tuple[str, List[dict]]],
-    results: Dict[str, dict],
-) -> None:
-    """Manual matching via questionary TUI."""
-    for app_name, candidates in needs_manual:
-        top = candidates[0]
-        actions = [
-            f"✅ Accept top match ({top.get('name', app_name)})",
-            "🔽 Pick another match",
-            "⏭ Skip this app",
-            "🚪 Quit matching",
-        ]
-        console.clear()
-        console.print(title_block())
-        console.print(Panel(
-            _t(f"[bold]{app_name}[/bold]\nFound [green]{len(candidates)}[/green] candidate(s)."),
-            border_style="cyan",
-        ))
-        console.print(match_table(app_name, candidates))
-        console.print(preview_panel(app_name, top))
-        action = questionary.select(
-            "What to do?",
-            choices=actions,
-            qmark="🤖",
-            style=questionary.Style([("highlighted", "bold cyan")]),
-        ).ask()
-        if action is None or "Quit matching" in action:
-            break
-        elif "Pick another match" in action:
-            pick = questionary.select(
-                "Pick candidate:",
-                choices=[
-                    questionary.Choice(
-                        title=f"{c.get('name', '?')}  {_candidate_css(c)}  [{c.get('tap','')}]",
-                        value=c,
-                    )
-                    for c in candidates
-                ],
-                qmark="🔽",
-            ).ask()
-            if pick:
-                results[app_name] = pick
-            else:
-                continue
-        elif "Skip this app" in action:
-            continue
-        else:
-            results[app_name] = top
-        time.sleep(0.05)
-
-
-def review_and_select(planned: List[Tuple[str, Optional[dict]]]) -> List[Tuple[str, Optional[dict]]]:
-    if not planned:
-        return planned
-    console.clear()
-    console.print(title_block())
-    console.print(Panel("Review your selections.\nAutoselected top matches where available.\nDeselect anything you don't want installed."))
+    # Phase 2 — interactive checkbox selection
     if questionary is None:
-        return planned
-    checkbox_choices = [
-        questionary.Choice(
-            title=_plan_checkbox_label(app, row),
-            value=(app, row),
-            checked=row is not None and row.get("cask"),
+        # No TUI: return auto-selected (score > 90)
+        return [
+            (app, matched[app]) for app in app_names
+            if app in matched and matched[app] is not None and score_val.get(app, 0) > 90
+        ]
+
+    choices: list = []
+    for app in app_names:
+        if app not in matched or matched[app] is None:
+            choices.append(
+                questionary.Choice(
+                    title=f"{app}  [dim]⏭ no cask found[/dim]",
+                    value=(app, matched.get(app)),
+                    disabled=True,
+                )
+            )
+            continue
+
+        cand = matched[app]
+        s = score_val.get(app, 0)
+        checked = s > 90
+        title = f"{app} → {cand.get('name', '')}  [{s} {_quality_plain(s)}]"
+        choices.append(
+            questionary.Choice(
+                title=title,
+                value=(app, cand),
+                checked=checked,
+            )
         )
-        for app, row in planned
-    ]
-    if not checkbox_choices:
-        return planned
+
     selected = questionary.checkbox(
-        "Selected installs",
-        choices=checkbox_choices,
+        "Select apps to install:",
+        choices=choices,
         qmark="✨",
         style=questionary.Style([("highlighted", "bold cyan")]),
-        instruction="(space to toggle, enter to confirm)",
-        validate=lambda a: len(a) > 0 or "Pick at least one item.",
+        instruction="(↓↑ to move, space to toggle, enter to confirm)",
+        validate=lambda a: len(a) > 0 or "Pick at least one app.",
     ).ask()
+
     if selected is None:
-        return planned
+        # User cancelled — fall back to auto-selected
+        return [
+            (app, matched[app]) for app in app_names
+            if app in matched and matched[app] is not None and score_val.get(app, 0) > 90
+        ]
     return selected
 
 
@@ -377,17 +266,11 @@ def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
             return
         if mode == "scan":
             current_planned = interactive_scan(folder)
-            # Normalise and save
-            normed = []
-            for app, cand in current_planned:
-                if cand and cand.get("name"):
-                    normed.append((app, _format_candidate(app, cand)))
-            upsert_planned_rows(normed, PLAN_PATH)
-            # Review checkbox
-            reviewed = review_and_select(normed)
-            upsert_planned_rows(reviewed, PLAN_PATH)
-            if confirmation_prompt("Install selected now?", action="Install", danger=False):
-                apply_selected(reviewed)
+            if current_planned:
+                normed = [(app, _format_candidate(app, cand)) for app, cand in current_planned if cand and cand.get("name")]
+                upsert_planned_rows(normed, PLAN_PATH)
+                if confirmation_prompt("Install selected now?", action="Install", danger=False):
+                    apply_selected(normed)
             continue
         if mode == "install":
             plan_rows = merge_planned_rows(load_planned_rows())
