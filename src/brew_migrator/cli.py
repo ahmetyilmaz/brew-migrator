@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn
+from rich.table import Table
+from rich.box import ROUNDED, SIMPLE_HEAD
 
 from .core.history import HistoryManager, HISTORY_PATH
 from .core.brew import (
@@ -141,32 +143,50 @@ def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tu
             else:
                 needs_manual.append((app_name, candidates))
 
-    # Phase 3 — present results
-    summary_parts = []
-    if auto_matched:
-        summary_parts.append(f"[bold green]{len(auto_matched)} auto-matched[/bold green]")
-    if needs_manual:
-        summary_parts.append(f"[bold yellow]{len(needs_manual)} need review[/bold yellow]")
-    if no_match:
-        summary_parts.append(f"[dim]{len(no_match)} no cask found (skipped)[/dim]")
-    if summary_parts:
-        console.print(Panel(_t("  •  ".join(summary_parts)), border_style="cyan"))
+    # Phase 3 — present results in a consolidated table
+    if auto_matched or needs_manual or no_match:
+        results_table = Table(
+            title=_t("[bold]Match Results[/bold]"),
+            box=ROUNDED,
+            expand=True,
+            caption=_t(f"[dim]{len(auto_matched)} auto-matched  •  "
+                       f"{len(needs_manual)} need review  •  "
+                       f"{len(no_match)} no cask found[/dim]"),
+        )
+        results_table.add_column("App", style="bold cyan", no_wrap=True)
+        results_table.add_column("Cask", style="white")
+        results_table.add_column("Score", justify="right", style="green", width=6)
+        results_table.add_column("Source", style="magenta")
+        results_table.add_column("Status", style="bold")
 
-    if auto_matched:
-        console.print("\n[bold]Auto-matched apps:[/bold]")
-        for app, cand in sorted(auto_matched.items()):
-            console.print(
-                _t(f"  [cyan]{app}[/cyan] → [green]{cand['name']}[/green]  "
-                   f"[dim](score: {cand.get('score', 0)}, "
-                   f"{'official' if cand.get('tap','').lower().startswith('homebrew/') else 'unofficial'})[/dim]")
-            )
-
-    if needs_manual:
-        console.print(f"\n[bold yellow]Apps needing manual match:[/bold yellow]")
-        for app, _cands in needs_manual:
-            console.print(_t(f"  [yellow]{app}[/yellow]"))
-
-    console.print()
+        for app in sorted(app_names):
+            if app in auto_matched:
+                cand = auto_matched[app]
+                official = "official" if cand.get("tap", "").lower().startswith("homebrew/") else "third-party"
+                results_table.add_row(
+                    app,
+                    cand.get("name", ""),
+                    str(cand.get("score", 0)),
+                    official,
+                    "[green]✓ auto[/green]",
+                )
+            elif any(a == app for a, _ in needs_manual):
+                results_table.add_row(
+                    app,
+                    "[dim]—[/dim]",
+                    "[dim]—[/dim]",
+                    "[dim]—[/dim]",
+                    "[yellow]⏳ manual[/yellow]",
+                )
+            elif app in no_match:
+                results_table.add_row(
+                    app,
+                    "[dim]—[/dim]",
+                    "[dim]—[/dim]",
+                    "[dim]—[/dim]",
+                    "[dim]⏭ skipped[/dim]",
+                )
+        console.print(results_table)
 
     # Ask user if they're satisfied with auto-matches
     if auto_matched and needs_manual:
