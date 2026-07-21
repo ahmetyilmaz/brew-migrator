@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/brew-migrator.svg)](https://pypi.org/project/brew-migrator/)
 [![Python versions](https://img.shields.io/pypi/pyversions/brew-migrator.svg)](https://pypi.org/project/brew-migrator/)
-[![License](https://img.shields.io/github/license/chriszimbizi/brew-migrator.svg)](https://github.com/chriszimbizi/brew-migrator/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/ahmetyilmaz/brew-migrator.svg)](https://github.com/ahmetyilmaz/brew-migrator/blob/main/LICENSE)
 
 A charm-style terminal tool to migrate manually installed macOS applications from `/Applications` to Homebrew Casks.
 
@@ -34,39 +34,26 @@ This generates a `Brewfile`. This single file is like a "save game" for your ent
 
 ## Installation
 
-### Via PyPI (Recommended)
+### Via PyPI
 
-Install the latest stable version directly from PyPI:
+PyPI currently serves the upstream package. To get this fork's changes, install from this repo instead.
+
+### From this fork (recommended)
 
 ```bash
-pip install brew-migrator
+git clone https://github.com/ahmetyilmaz/brew-migrator.git
+cd brew-migrator
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -U pip
+pip install -e .
+brew-migrator --help
 ```
 
-### From Source
-
-1. Clone the repository:
-
-   ```bash
-   git clone https://github.com/chriszimbizi/brew-migrator.git
-   cd brew-migrator
-   ```
-
-2. Install in editable mode:
-
-   ```bash
-   pip install -e .
-   ```
-
-3. Verify the install:
-
-   ```bash
-   brew-migrator --help
-   ```
-
-#### Install directly from the repo without cloning
+Or install directly without cloning:
 
 ```bash
-pip install git+https://github.com/chriszimbizi/brew-migrator.git
+pip install git+https://github.com/ahmetyilmaz/brew-migrator.git
 ```
 
 ## Requirements
@@ -117,7 +104,7 @@ This creates/updates a plan, prints the match table, and stores it in one place.
 brew-migrator --apply-plan
 ```
 
-If the plan path is omitted, the tool uses the default single-plan file for this PC, or you can pass a saved path explicitly.
+This uses the single plan file saved for this machine. You can still pass an explicit path if needed.
 
 **List apps:**
 

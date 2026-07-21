@@ -266,7 +266,7 @@ def main():
     parser.add_argument("--app", type=str, help="Process a specific app by name.")
     parser.add_argument("--reset-history", action="store_true", help="Clear migration history.")
     parser.add_argument("--plan", action="store_true", default=False, help="Create or update plan without installing.")
-    parser.add_argument("--apply-plan", type=str, default="", help="Install from saved plan.")
+    parser.add_argument("--apply-plan", type=str, nargs="?", const=PLAN_PATH, default=PLAN_PATH, help="Install from saved plan. Defaults to the single plan file for this PC.")
     parser.add_argument("--interactive", action="store_true", help="Direct interactive install mode.")
     parser.add_argument("--batch", action="store_true", help="Batch mode: install top match automatically.")
     parser.add_argument("--retry-skipped", action="store_true", help="Retry previously skipped apps.")
