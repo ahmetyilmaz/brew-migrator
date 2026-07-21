@@ -92,7 +92,7 @@ def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tu
             if questionary is None:
                 console.clear()
                 console.print(title_block())
-                console.print(Panel.from_markup(f"**{app_name}**\nFound {len(candidates)} candidate(s)."))
+                console.print(Panel(_t(f"[bold]{app_name}[/bold]\\nFound {len(candidates)} candidate(s).")))
                 console.print(match_table(app_name, candidates))
                 console.print(preview_panel(app_name, selected))
                 choice = input("Action: [1]install top  [2]pick another  [3]skip  [4]ignore  [q]uit ").strip().lower()
@@ -121,7 +121,7 @@ def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tu
                 ]
                 console.clear()
                 console.print(title_block())
-                console.print(Panel.from_markup(f"**{app_name}**\nFound [green]{len(candidates)}[/green] candidate(s)."))
+                console.print(Panel(_t(f"[bold]{app_name}[/bold]\\nFound {len(candidates)} candidate(s).")))
                 console.print(match_table(app_name, candidates))
                 console.print(preview_panel(app_name, selected))
                 action = questionary.select(
@@ -157,7 +157,7 @@ def interactive_scan(applications_folder: str = _APPLICATIONS_FOLDER) -> List[Tu
                     return [(app, chosen.get(app)) for app in chosen]
         else:
             console.clear()
-            console.print(Panel.from_markup(f"**{app_name}**\nNo matches found."))
+            console.print(Panel(_t(f"[bold]{app_name}[/bold]\\nNo matches found.")))
             if questionary is not None:
                 action = questionary.select(
                     "No matches. What to do?",
@@ -268,7 +268,7 @@ def run_flow(folder: str = _APPLICATIONS_FOLDER) -> None:
 
 def apply_selected(planned: List[Tuple[str, Optional[dict]]]) -> bool:
     console.clear()
-    console.print(Panel.from_markup(f"Selected installs: [green]{sum(1 for _, r in planned if r and r.get('cask'))}[/green]"))
+    console.print(Panel(_t(f"Selected installs: [green]{sum(1 for _, r in planned if r and r.get('cask'))}[/green]")))
     console.print(plan_table(planned))
     console.print()
     if not confirmation_prompt("Begin install?", action="Install", danger=False):
