@@ -487,25 +487,25 @@ def main_menu(plan_size: int = 0, history_size: int = 0) -> str:
     console.print()
     choices = [
         questionary.Choice(
-            title=f":mag:  Scan & Plan  {'(' + str(plan_size) + ' ready)' if plan_size else '(fresh)'}",
+            title=f"🔍  Scan & Plan  {'(' + str(plan_size) + ' ready)' if plan_size else '(fresh)'}",
             value="scan",
         ),
         questionary.Choice(
-            title=f":rocket:  Install Selected Plan  {'(' + str(plan_size) + ')' if plan_size else '(no plan yet)'}",
+            title=f"🚀  Install Selected Plan  {'(' + str(plan_size) + ')' if plan_size else '(no plan yet)'}",
             value="install",
             disabled=(not plan_size),
         ),
         questionary.Choice(
-            title=f":eyes:  View History  {'(' + str(history_size) + ')' if history_size else '(empty)'}",
+            title=f"👀  View History  {'(' + str(history_size) + ')' if history_size else '(empty)'}",
             value="history",
             disabled=(not history_size),
         ),
         questionary.Choice(
-            title=f":recycle:  Retry Failed / Skipped",
+            title=f"♻️  Retry Failed / Skipped",
             value="retry",
         ),
         questionary.Choice(
-            title=":door:  Quit",
+            title="🚪  Quit",
             value="quit",
         ),
     ]
