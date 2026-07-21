@@ -16,7 +16,6 @@ func main() {
 
 	p := tea.NewProgram(
 		newModel(),
-		tea.WithAltScreen(),
 		tea.WithMouseCellMotion(),
 	)
 

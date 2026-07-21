@@ -198,7 +198,7 @@ func newModel() *model {
 	h := help.New()
 	h.Width = 80
 
-	return &model{
+	m := &model{
 		state:          screenMenu,
 		menuCursor:     0,
 		spinner:        s,
@@ -207,6 +207,8 @@ func newModel() *model {
 		selViewport:    viewport.New(80, 10),
 		historyEntries: loadHistory(),
 	}
+	m.menuItems = buildMenu(m)
+	return m
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
@@ -332,6 +334,9 @@ func (m *model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m *model) renderMenu() string {
 	var b strings.Builder
+
+	// Refresh menu items so plan/history counts are live
+	m.menuItems = buildMenu(m)
 
 	// ── Title block ──
 	title := lipgloss.NewStyle().
