@@ -357,19 +357,6 @@ def format_dry_run_candidates(
     return scored
 
 
-def _write_dry_run_plan(
-    title: str,
-    planned_rows: Sequence[Tuple[str, dict]],
-    export_path: str = "",
-) -> None:
-    """Compatibility shim for the original dry-run writer. The current plan
-    path is handled by ``cli._update_plan`` / ``cli.run_plan``, so this
-    intentionally does not write files. The name is kept so ``cli.py``
-    imports resolve when the legacy UI flag is not wired in."""
-    del title, planned_rows, export_path
-    return None
-
-
 def ask_match(title: str, matches: Sequence[dict], start_idx: int = 0) -> Tuple[str, Optional[str]]:
     action = "match"
     while True:

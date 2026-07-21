@@ -28,7 +28,6 @@ from .ui.console import (
     display_retro_list,
     animated_boot,
     AnimatedWait,
-    _write_dry_run_plan,
     _use_colors,
     BRAND,
     GOOD,
