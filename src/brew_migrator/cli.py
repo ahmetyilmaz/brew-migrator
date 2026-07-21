@@ -15,6 +15,7 @@ from .core.brew import (
     get_cask_candidates,
 )
 from .ui.console import (
+    console,
     title_block,
     flow_badge,
     welcome_panel,
@@ -364,9 +365,9 @@ def main():
     interactive_requested = args.interactive
 
     if not plain and not args.apply_plan:
-        print(title_block())
-        print(welcome_panel(len(app_names), len(history_manager.history), len(history_manager.get_ignored())))
-        print(flow_badge(3))
+        console.print(title_block())
+        console.print(welcome_panel(len(app_names), len(history_manager.history), len(history_manager.get_ignored())))
+        console.print(flow_badge(3))
 
     if args.plan or (not interactive_requested and not any([
         args.batch,
