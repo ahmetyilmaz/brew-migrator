@@ -60,21 +60,24 @@ func historyPath() string {
 // ── Brew list (installed casks cache) ──────────────────────
 
 var (
-	installedCasksMap   map[string]bool
+	installedCasksMap   map[string]string // normalized → original cask name
 	installedCasksMu    sync.Mutex
 	installedCasksLoaded bool
 )
 
-// loadInstalledCasks fetches all installed casks once and caches them in a map.
+// loadInstalledCasks fetches all installed casks once and caches them.
+// The map key is the normalized name (for lookups), the value is the
+// original cask name (for installation).
 // Subsequent calls are no-ops. Returns the map for convenience.
-func loadInstalledCasks() map[string]bool {
+func loadInstalledCasks() map[string]string {
 	installedCasksMu.Lock()
 	defer installedCasksMu.Unlock()
 	if installedCasksLoaded {
 		return installedCasksMap
 	}
-	installedCasksMap = make(map[string]bool)
-	out, err := runBrew("list", "--cask", "--full-name")
+	installedCasksMap = make(map[string]string)
+	// brew list --cask exits non-zero when no casks installed, so accept errors
+	out, err := runBrew("list", "--cask")
 	if err != nil {
 		installedCasksLoaded = true
 		return installedCasksMap
@@ -84,13 +87,9 @@ func loadInstalledCasks() map[string]bool {
 		if name == "" {
 			continue
 		}
-		// Store normalized version (strip spaces/hyphens/underscores)
-		// so lookup via normalizeCaskName() matches correctly
-		if idx := strings.LastIndex(name, "/"); idx >= 0 {
-			short := name[idx+1:]
-			installedCasksMap[normalizeCaskName(short)] = true
-		}
-		installedCasksMap[normalizeCaskName(name)] = true
+		// brew list --cask returns short names like "google-chrome"
+		// Store normalized → original so we can look up the real cask name
+		installedCasksMap[normalizeCaskName(name)] = name
 	}
 	installedCasksLoaded = true
 	return installedCasksMap
@@ -103,21 +102,25 @@ func isInstalledFast(caskName string) bool {
 	if installedCasksMap == nil {
 		return false
 	}
-	return installedCasksMap[caskName]
+	_, ok := installedCasksMap[normalizeCaskName(caskName)]
+	return ok
 }
 
 // fastMatchInstalled checks if the app name (normalized) directly matches
-// an installed cask. Returns a Candidate if found, nil otherwise.
+// an installed cask. Returns a Candidate with the real cask name if found.
 func fastMatchInstalled(appName string) *Candidate {
 	normalized := normalizeCaskName(appName)
 	if normalized == "" {
 		return nil
 	}
-	if !isInstalledFast(normalized) {
+	installedCasksMu.Lock()
+	realName, ok := installedCasksMap[normalized]
+	installedCasksMu.Unlock()
+	if !ok {
 		return nil
 	}
 	return &Candidate{
-		Name:      normalized,
+		Name:      realName, // original cask name, NOT normalized
 		Score:     100,
 		Installed: true,
 	}
@@ -388,7 +391,7 @@ func isAlreadyInstalled(pkg string) bool {
 	if isInstalledFast(pkg) {
 		return true
 	}
-	return exec.Command("brew", "list", "--cask", "--full-name", pkg).Run() == nil
+	return exec.Command("brew", "list", "--cask", pkg).Run() == nil
 }
 
 func installCask(name string) (bool, string) {
