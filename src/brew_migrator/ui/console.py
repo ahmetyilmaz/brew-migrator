@@ -12,7 +12,14 @@ from rich.text import Text
 from rich.markdown import Markdown
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn
 from rich.align import Align
-from rich.box import box
+from rich.box import (
+    HEAVY,
+    HEAVY_EDGE,
+    MINIMAL,
+    SIMPLE_HEAD,
+    SQUARE,
+    DOUBLE,
+)
 
 try:
     import questionary
@@ -81,7 +88,7 @@ def title_block(version: str = "v0.0.3") -> Panel:
         title=_t("[bold cyan]BREW MIGRATOR[/bold cyan]"),
         subtitle=_t("[dim]charm.land-inspired terminal experience[/dim]"),
         border_style="cyan",
-        box=box.HEAVY_EDGE,
+        box=HEAVY_EDGE,
         padding=(0, 3),
     )
 
@@ -99,7 +106,7 @@ def flow_badge(step: int) -> Panel:
         Text.from_markup(body, style=BRAND),
         title=_t("[bold white]Progress[/bold white]"),
         border_style="blue",
-        box=box.MINIMAL,
+        box=MINIMAL,
         padding=(0, 1),
     )
 
@@ -134,7 +141,7 @@ def welcome_panel(app_count: int, history_count: int, ignore_count: int) -> Pane
         title=_t("[bold white]Welcome, friend.[/bold white]"),
         subtitle=_t("[dim]You stayed on the safe path.[/dim]"),
         border_style="magenta",
-        box=box.DOUBLE,
+        box=DOUBLE,
         padding=(1, 2),
     )
 
@@ -183,7 +190,7 @@ def trust_banner(text: str, kind: str = "default") -> Panel:
         _t(f"⚠️  {text}"),
         title=_t("[bold white]Trust action[/bold white]"),
         border_style=style,
-        box=box.SQUARE,
+        box=SQUARE,
         padding=(0, 1),
     )
 
@@ -218,7 +225,7 @@ def preview_panel(app: str, candidate: dict, force: bool = False, dry_run: bool 
         title=_t("[bold white]Action preview[/bold white]"),
         subtitle=_t("[dim]Read carefully before confirming.[/dim]"),
         border_style="yellow",
-        box=box.HEAVY,
+        box=HEAVY,
         padding=(0, 2),
     )
 
@@ -245,7 +252,7 @@ def confirmation_prompt(message: str, action: str = "Confirm", danger: bool = Fa
 def list_apps(title: str, items: Sequence[str], count: Optional[int] = None) -> None:
     if count is None:
         count = len(items)
-    table = Table(title=title, box=box.SIMPLE_HEAD)
+    table = Table(title=title, box=SIMPLE_HEAD)
     table.add_column("#", justify="right", style="dim", width=5)
     table.add_column("App", style="cyan", no_wrap=True)
     for idx, item in enumerate(items, 1):
@@ -257,7 +264,7 @@ def list_apps(title: str, items: Sequence[str], count: Optional[int] = None) -> 
 
 def match_table(title: str, matches: Sequence[dict], start_idx: int = 0, page_size: int = 6) -> Panel:
     end_idx = min(start_idx + page_size, len(matches))
-    table = Table(box=box.SIMPLE_HEAD, row_styles=["on black", ""])
+    table = Table(box=SIMPLE_HEAD, row_styles=["on black", ""])
     table.add_column("#", style="dim", width=4)
     table.add_column("Cask", style="cyan", no_wrap=True)
     table.add_column("Score", justify="right", style="green", width=7)
@@ -280,7 +287,7 @@ def match_table(title: str, matches: Sequence[dict], start_idx: int = 0, page_si
             Text("yes" if match.get("installed") else "no", style=GOOD if match.get("installed") else BAD),
             desc,
         )
-    return Panel(table, title=title, border_style="green", box=box.HEAVY_EDGE)
+    return Panel(table, title=title, border_style="green", box=HEAVY_EDGE)
 
 
 def ask_match(title: str, matches: Sequence[dict], start_idx: int = 0) -> Tuple[str, Optional[str]]:
@@ -354,7 +361,7 @@ def display_dry_run_plan(title: str, planned_rows: Sequence[Tuple[str, dict]], e
     if not planned_rows:
         console.print(_t(f":warning: {title}: (None found)"), style=WARN)
         return
-    table = Table(title=title, box=box.HEAVY, expand=True)
+    table = Table(title=title, box=HEAVY, expand=True)
     table.add_column("App", style="bold cyan", no_wrap=True)
     table.add_column("Proposed Cask", style="white", no_wrap=True)
     table.add_column("Score", justify="right", style=GOOD, width=8)
