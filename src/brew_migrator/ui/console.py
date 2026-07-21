@@ -40,6 +40,45 @@ def _use_colors() -> bool:
 console = Console(force_terminal=_use_colors(), color_system="standard")
 err_console = Console(stderr=True, force_terminal=_use_colors(), color_system="standard")
 
+
+# Backwards-compatible shims for the original retro API still referenced
+# from core/* (history.py, brew.py). The new rich/questionary UI is the
+# primary surface, but these names are kept so core helpers don't break
+# when a history file fails to load or a brew command raises.
+RED = "bold red"
+
+
+def retro_print(text: str, style: str = "", err: bool = True) -> None:
+    """Minimal retro-style print used by core/* for warnings/errors."""
+    target = err_console if err else console
+    if not _use_colors():
+        target.print(text)
+        return
+    style_name = (style or "").lower()
+    if "red" in style_name:
+        target.print(Text(text, style="bold red"))
+    else:
+        target.print(text)
+
+
+class ProgressBar:
+    """Tiny context manager that prints a start/finish line. Replaces the
+    original progress indicator used by the brew install path.
+    """
+
+    def __init__(self, label: str) -> None:
+        self.label = label
+
+    def __enter__(self) -> "ProgressBar":
+        console.print(f"[bold cyan]{self.label}[/bold cyan]")
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if exc is None:
+            console.print(f"[bold green]done[/bold green] {self.label}")
+        else:
+            console.print(f"[bold red]failed[/bold red] {self.label}")
+
 BRAND = "bold cyan"
 GOOD = "bold green"
 WARN = "bold yellow"
