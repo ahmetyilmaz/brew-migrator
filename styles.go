@@ -1,174 +1,175 @@
 package main
 
-import (
-	"github.com/charmbracelet/lipgloss"
-)
+import "github.com/charmbracelet/lipgloss"
 
-// ── Color palette ──────────────────────────────────────────────────────────
-const (
-	colorBrand     = "#00BFFF" // deep-sky-blue
-	colorGood      = "#00FF7F" // spring-green
-	colorWarn      = "#FFD700" // gold
-	colorBad       = "#FF4444" // red
-	colorMuted     = "#888888"
-	colorBg        = "#1A1A2E"
-	colorBgLight   = "#16213E"
-	colorSurface   = "#0F3460"
-	colorText      = "#E0E0E0"
-	colorTextDim   = "#666666"
-	colorAccent    = "#E94560"
-	colorCyan      = "#00CED1"
-	colorMagenta   = "#FF69B4"
-	colorGreen     = "#32CD32"
-	colorYellow    = "#FFD700"
-	colorOrange    = "#FF8C00"
-)
-
-// ── Reusable styles ────────────────────────────────────────────────────────
+// ── Tokyo Night inspired palette ────────────────────────────────
+// These are adaptive — look great on both light and dark terminals.
 var (
-	// App / branding
-	AppTitleStyle = lipgloss.NewStyle().
+	clrBg       = lipgloss.AdaptiveColor{Light: "#f4f4f5", Dark: "#1a1b26"}
+	clrBgLight  = lipgloss.AdaptiveColor{Light: "#e4e4e7", Dark: "#24283b"}
+	clrSurface  = lipgloss.AdaptiveColor{Light: "#d4d4d8", Dark: "#2f3340"}
+	clrBrand    = lipgloss.AdaptiveColor{Light: "#0891b2", Dark: "#7dcfff"}
+	clrSuccess  = lipgloss.AdaptiveColor{Light: "#16a34a", Dark: "#9ece6a"}
+	clrWarn     = lipgloss.AdaptiveColor{Light: "#ca8a04", Dark: "#e0af68"}
+	clrError    = lipgloss.AdaptiveColor{Light: "#dc2626", Dark: "#f7768e"}
+	clrText     = lipgloss.AdaptiveColor{Light: "#18181b", Dark: "#c0caf5"}
+	clrTextDim  = lipgloss.AdaptiveColor{Light: "#71717a", Dark: "#565f89"}
+	clrMuted    = lipgloss.AdaptiveColor{Light: "#a1a1aa", Dark: "#3b4261"}
+	clrAccent   = lipgloss.AdaptiveColor{Light: "#7c3aed", Dark: "#bb9af7"}
+)
+
+// ── Reusable style blocks ───────────────────────────────────────
+
+var (
+	// Outer document wrapper
+	DocStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(clrSurface).
+			Padding(1, 2)
+
+	// Title bar
+	TitleStyle = lipgloss.NewStyle().
 			Bold(true).
-			Foreground(lipgloss.Color(colorBrand)).
-			MarginBottom(1)
+			Foreground(clrBrand)
 
 	SubtitleStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorTextDim)).
+			Foreground(clrTextDim)
+
+	// ── Sidebar / Menu ──
+
+	CardStyle = lipgloss.NewStyle().
+			Border(lipgloss.NormalBorder()).
+			BorderForeground(clrSurface).
+			Padding(0, 2).
 			MarginBottom(1)
 
-	// Layout
-	AppStyle = lipgloss.NewStyle().
-			Padding(1, 2).
-			Background(lipgloss.Color(colorBg))
+	ActiveCardStyle = lipgloss.NewStyle().
+				Border(lipgloss.NormalBorder()).
+				BorderForeground(clrBrand).
+				BorderLeft(true).
+				Padding(0, 2).
+				MarginBottom(1).
+				Background(clrBgLight)
 
-	HeaderStyle = lipgloss.NewStyle().
+	MenuItemTitle = lipgloss.NewStyle().
+			Foreground(clrText).
+			Padding(0, 1)
+
+	MenuItemTitleActive = lipgloss.NewStyle().
+				Foreground(clrBrand).
+				Bold(true).
+				Padding(0, 1)
+
+	MenuItemDesc = lipgloss.NewStyle().
+			Foreground(clrTextDim).
+			Italic(true).
+			Padding(0, 1)
+
+	CursorArrow = lipgloss.NewStyle().
+			Foreground(clrBrand).
+			Bold(true)
+
+	// ── Buttons ──
+
+	BtnPrimary = lipgloss.NewStyle().
+			Background(clrBrand).
+			Foreground(clrBg).
+			Bold(true).
 			Padding(0, 2).
-			Background(lipgloss.Color(colorSurface))
-
-	// Buttons / Menu
-	MenuItemStyle = lipgloss.NewStyle().
-			Padding(0, 2).
-			MarginRight(2)
-
-	MenuCursorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorBad)).
 			MarginRight(1)
 
-	MenuSelectedItemStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorBrand)).
-				Bold(true)
+	BtnSecondary = lipgloss.NewStyle().
+			Background(clrSurface).
+			Foreground(clrText).
+			Padding(0, 2).
+			MarginRight(1)
 
-	MenuDescriptionStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorTextDim)).
-				Italic(true)
+	// ── Tables ──
 
-	// Quality badges
-	BadgePerfectStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorGreen)).
-				Bold(true)
-
-	BadgeMaybeStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorYellow))
-
-	BadgeQuestionableStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorOrange))
-
-	BadgeSkippedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorTextDim))
-
-	// Checkboxes
-	CheckboxCheckedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorGreen)).
-				Bold(true)
-
-	CheckboxUncheckedStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorTextDim))
-
-	CheckboxDisabledStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorMuted))
-
-	CursorStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorBrand)).
-			Bold(true)
-
-	// Table / list
-	ColumnStyle = lipgloss.NewStyle().
+	TableHeader = lipgloss.NewStyle().
+			Bold(true).
+			Foreground(clrBrand).
 			Padding(0, 1)
 
-	RowHighlightStyle = lipgloss.NewStyle().
-				Background(lipgloss.Color(colorBgLight))
+	TableCell = lipgloss.NewStyle().
+			Padding(0, 1)
 
-	RowAltStyle = lipgloss.NewStyle().
-			Background(lipgloss.Color(colorBg))
+	TableHighlight = lipgloss.NewStyle().
+			Background(clrBgLight)
 
-	// Help
-	HelpStyle = lipgloss.NewStyle().
+	// ── Progress ──
+
+	ProgressBar = lipgloss.NewStyle().
+			Padding(0, 1)
+
+	ProgressPct = lipgloss.NewStyle().
+			Foreground(clrSuccess).
+			Bold(true)
+
+	// ── Help footer ──
+
+	HelpFooter = lipgloss.NewStyle().
+			Foreground(clrTextDim).
 			Padding(0, 2).
-			Foreground(lipgloss.Color(colorTextDim)).
 			MarginTop(1)
 
-	// Progress
-	ProgressBarStyle = lipgloss.NewStyle().
-				Padding(0, 2).
-				MarginTop(1)
+	// ── Quality badges ──
 
-	ProgressPercentStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorGood)).
-				Bold(true)
-
-	// Status labels
-	StatusSuccess = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorGreen)).
-			Bold(true).
-			Render("✓")
-
-	StatusFail = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorBad)).
-			Bold(true).
-			Render("✗")
-
-	StatusPending = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorTextDim)).
-			Render("…")
-
-	StatusSkipped = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorMuted)).
-			Render("—")
-
-	// Borders
-	BorderStyle = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(lipgloss.Color(colorSurface)).
-			Padding(0, 1)
-
-	// Summary / notification
-	SummaryGoodStyle = lipgloss.NewStyle().
-				Foreground(lipgloss.Color(colorGreen)).
-				Bold(true)
-
-	SummaryBadStyle = lipgloss.NewStyle().
-			Foreground(lipgloss.Color(colorBad)).
+	BadgePerfect = lipgloss.NewStyle().
+			Foreground(clrSuccess).
 			Bold(true)
+
+	BadgeMaybe = lipgloss.NewStyle().
+			Foreground(clrWarn)
+
+	BadgeQuestionable = lipgloss.NewStyle().
+				Foreground(clrError)
+
+	BadgeSkipped = lipgloss.NewStyle().
+			Foreground(clrMuted)
+
+	// ── Checkbox / selection ──
+
+	CBChecked = lipgloss.NewStyle().
+			Foreground(clrSuccess).
+			Bold(true)
+
+	CBUnchecked = lipgloss.NewStyle().
+			Foreground(clrTextDim)
+
+	CBDisabled = lipgloss.NewStyle().
+			Foreground(clrMuted)
+
+	// ── Status glyphs ──
+
+	GlyphOK   = lipgloss.NewStyle().Foreground(clrSuccess).Bold(true).Render("✓")
+	GlyphFail = lipgloss.NewStyle().Foreground(clrError).Bold(true).Render("✗")
+	GlyphWait = lipgloss.NewStyle().Foreground(clrTextDim).Render("…")
+	GlyphSkip = lipgloss.NewStyle().Foreground(clrMuted).Render("—")
+
+	// ── Separator ──
+
+	Sep = lipgloss.NewStyle().
+		Foreground(clrSurface).
+		Render("──────────────────────────────────────────")
 )
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+// ── Quality helpers ─────────────────────────────────────────────
 
-// QualityBadge returns a lipgloss styled string for a quality level.
-func QualityBadge(score int) string {
+func qualityBadge(score int) string {
 	switch {
 	case score > 90:
-		return BadgePerfectStyle.Render("⭐ near perfect")
+		return BadgePerfect.Render("⭐ near perfect")
 	case score >= 50:
-		return BadgeMaybeStyle.Render("🤔 maybe")
+		return BadgeMaybe.Render("🤔 maybe")
 	case score < 0:
-		return BadgeSkippedStyle.Render("⏭ skipped")
+		return BadgeSkipped.Render("⏭ skipped")
 	default:
-		return BadgeQuestionableStyle.Render("❓ questionable")
+		return BadgeQuestionable.Render("❓ questionable")
 	}
 }
 
-// QualityEmoji returns just the emoji for compact display.
-func QualityEmoji(score int) string {
+func qualityEmoji(score int) string {
 	switch {
 	case score > 90:
 		return "⭐"
@@ -178,17 +179,5 @@ func QualityEmoji(score int) string {
 		return "⏭"
 	default:
 		return "❓"
-	}
-}
-
-// QualityPlain returns a plain text quality label (no lipgloss).
-func QualityPlain(score int) string {
-	switch {
-	case score > 90:
-		return "⭐ near perfect"
-	case score >= 50:
-		return "🤔 maybe"
-	default:
-		return "❓ questionable"
 	}
 }
