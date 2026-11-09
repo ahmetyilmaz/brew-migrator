@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -38,6 +39,7 @@ type installProgressMsg struct {
 	name    string
 	success bool
 	detail  string
+	output  string
 }
 type installDoneMsg struct{}
 
@@ -50,15 +52,20 @@ type model struct {
 	scanApps                      []AppInfo
 	scanCur, scanTotal            int
 	scanDone                      bool
+	hiddenManaged                 int
 	cursor, reviewCur, historyCur int
 	selectedApps                  []*AppInfo
 	installApps                   []*AppInfo
 	installCur, installTotal      int
 	installResults                []installResult
 	stopInstall                   bool
+	installLog                    strings.Builder
+	logOffset                     int
+	followLog                     bool
 	histEntries                   map[string]HistoryEntry
 	spinner                       spinner.Model
 	err                           error
+	planFile                      string
 }
 type installResult struct {
 	name   string
@@ -70,7 +77,9 @@ func NewModel() *model {
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(clrBrand)
-	return &model{spinner: s, histEntries: loadHistory()}
+	m := &model{spinner: s, histEntries: loadHistory(), planFile: filepath.Join(stateDir(), ".brew_migrator_plan.json")}
+	m.restorePlan()
+	return m
 }
 func (m *model) Init() tea.Cmd { return m.spinner.Tick }
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -109,6 +118,17 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleScanDone()
 	case installProgressMsg:
+		m.installLog.WriteString(msg.output)
+		if msg.detail != "" && !strings.Contains(msg.output, msg.detail) {
+			m.installLog.WriteString(msg.detail + "\n")
+		}
+		status := "✅ " + msg.name + " completed"
+		if !msg.success {
+			status = "❌ " + msg.name + " failed"
+		} else if msg.detail != "" {
+			status = "⏭️ " + msg.name + " skipped"
+		}
+		m.installLog.WriteString("\n" + status + "\n\n")
 		m.installResults = append(m.installResults, installResult{msg.name, msg.success, msg.detail})
 		m.installCur++
 		if m.stopInstall {
@@ -124,6 +144,8 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.state == screenInstalling {
 			if k == "q" || k == "ctrl+c" {
 				m.stopInstall = true
+			} else {
+				m.scrollLog(k)
 			}
 			return m, nil
 		}
@@ -131,7 +153,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		}
-		if m.ready && (m.width < 72 || m.height < 24) {
+		if m.ready && (m.width < 70 || m.height < 20) {
 			return m, nil
 		}
 		switch m.state {
@@ -147,6 +169,9 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				case 0:
 					return m, m.startScan()
 				case 1:
+					if !m.scanDone {
+						m.restorePlan()
+					}
 					m.prepareReview()
 				case 2:
 					m.state = screenHistory
@@ -186,13 +211,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case screenSummary:
-			switch k {
-			case "up", "k":
-				m.reviewCur = max(0, m.reviewCur-1)
-			case "down", "j":
-				m.reviewCur = min(max(0, len(m.installResults)-1), m.reviewCur+1)
-			case "enter", "esc":
+			if k == "enter" || k == "esc" {
 				m.state = screenMenu
+			} else {
+				m.scrollLog(k)
 			}
 		case screenHistory:
 			switch k {
@@ -219,6 +241,7 @@ func (m *model) startScan() tea.Cmd {
 	m.scanCur = 0
 	m.scanTotal = 0
 	m.scanApps = nil
+	m.hiddenManaged = 0
 	m.selectedApps = nil
 	m.cursor = 0
 	m.scanDone = false
@@ -262,8 +285,19 @@ func (m *model) handleScanProgress(msg scanProgressMsg) (tea.Model, tea.Cmd) {
 }
 func (m *model) handleScanDone() (tea.Model, tea.Cmd) {
 	m.scanDone = true
+	remaining := make([]AppInfo, 0, len(m.scanApps))
+	m.hiddenManaged = 0
+	for _, app := range m.scanApps {
+		if managed(app) {
+			m.hiddenManaged++
+			continue
+		}
+		remaining = append(remaining, app)
+	}
+	m.scanApps = remaining
 	m.state = screenSelection
 	m.cursor = 0
+	m.persistPlan()
 	return m, nil
 }
 func managed(app AppInfo) bool {
@@ -284,6 +318,7 @@ func chosenInstalled(app AppInfo) bool {
 	return false
 }
 func (m *model) updateSelection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	changed := false
 	switch msg.String() {
 	case "esc":
 		m.state = screenMenu
@@ -306,6 +341,7 @@ func (m *model) updateSelection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			a := &m.scanApps[m.cursor]
 			if !a.Skipped && !managed(*a) && !chosenInstalled(*a) {
 				a.Selected = !a.Selected
+				changed = true
 			}
 		}
 	case "left", "right":
@@ -330,6 +366,10 @@ func (m *model) updateSelection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		a.BestCask = a.Candidates[idx].Name
 		a.Score = a.Candidates[idx].Score
+		changed = true
+	}
+	if changed {
+		m.persistPlan()
 	}
 	return m, nil
 }
@@ -352,6 +392,9 @@ func (m *model) startInstall() tea.Cmd {
 	m.installTotal = len(m.installApps)
 	m.installCur = 0
 	m.installResults = nil
+	m.installLog.Reset()
+	m.logOffset = 0
+	m.followLog = true
 	m.stopInstall = false
 	m.reviewCur = 0
 	return m.installNext()
@@ -361,39 +404,38 @@ func (m *model) installNext() tea.Cmd {
 		return func() tea.Msg { return installDoneMsg{} }
 	}
 	app := *m.installApps[m.installCur]
-	return func() tea.Msg {
-		ok, detail := installCask(app.BestCask)
-		status := "migrated"
-		record := app.BestCask
-		if !ok {
-			status = "failed"
-			record = detail
-		} else if detail != "" {
-			status = "skipped"
-			record = detail
+	m.installLog.WriteString(fmt.Sprintf("📦 %s → %s\n$ brew install --cask --adopt %s\n\n", app.Name, app.BestCask, app.BestCask))
+	job := &interactiveInstall{app: app}
+	return tea.Exec(job, func(err error) tea.Msg {
+		if err != nil {
+			return installProgressMsg{name: app.Name, detail: err.Error(), output: job.output.String()}
 		}
-		updateHistory(app.Name, status, record)
-		return installProgressMsg{app.Name, ok, detail}
-	}
+		return installProgressMsg{name: app.Name, success: job.ok, detail: job.detail, output: job.output.String()}
+	})
 }
 
-const legend = "Legend: * strong match | ~ review match | ? uncertain | - no match"
-const selectionLegend = "[x] selected | [ ] available | [B] managed by Brew (locked)"
+const legend = "Legend: ⭐ strong match  🤔 review  ❓ uncertain  ⏭ no match"
+const selectionLegend = "☑ selected  ☐ available  🍺 Brew-managed apps hidden"
 
 func matchLabel(score int) string {
 	switch {
 	case score > 90:
-		return "* strong"
+		return "⭐ strong"
 	case score >= 50:
-		return "~ review"
+		return "🤔 review"
 	case score < 0:
-		return "- no match"
+		return "⏭ no match"
 	default:
-		return "? uncertain"
+		return "❓ uncertain"
 	}
 }
-func (m *model) listHeight() int      { return max(1, m.height-9) }
-func (m *model) selectionHeight() int { return max(1, m.height-16) }
+func (m *model) listHeight() int { return max(1, m.height-9) }
+func (m *model) selectionHeight() int {
+	if m.width >= 104 {
+		return max(1, (m.height-14)/2)
+	}
+	return max(1, (m.height-16)/2)
+}
 func visibleRange(cursor, total, rows int) (int, int) {
 	rows = max(1, rows)
 	cursor = max(0, min(cursor, total-1))
@@ -401,10 +443,13 @@ func visibleRange(cursor, total, rows int) (int, int) {
 	return start, min(total, start+rows)
 }
 func (m *model) frame(title, subtitle string, body []string, footer string) string {
+	if m.err != nil {
+		subtitle = "⚠️ " + m.err.Error()
+	}
 	width := max(1, m.width)
 	height := max(1, m.height)
 	trim := func(s string) string { return ansi.Truncate(strings.ReplaceAll(s, "\n", " "), width, "") }
-	lines := []string{TitleStyle.Render(trim("BREW MIGRATOR / " + title)), trim(subtitle), strings.Repeat("─", width)}
+	lines := []string{TitleStyle.Render(trim("🍺 brew migrator / " + title)), trim(subtitle), ""}
 	available := max(0, height-5)
 	for i := 0; i < available; i++ {
 		line := ""
@@ -413,7 +458,7 @@ func (m *model) frame(title, subtitle string, body []string, footer string) stri
 		}
 		lines = append(lines, trim(line))
 	}
-	lines = append(lines, strings.Repeat("─", width), trim(footer))
+	lines = append(lines, lipgloss.NewStyle().Foreground(clrAccent).Render("╰"+strings.Repeat("─", max(0, width-2))+"╯"), trim(footer))
 	if len(lines) > height {
 		lines = lines[:height]
 	}
@@ -423,8 +468,8 @@ func (m *model) View() string {
 	if !m.ready {
 		return "Loading Brew Migrator…"
 	}
-	if m.width < 72 || m.height < 24 {
-		text := fmt.Sprintf("Resize terminal: need 72x24 (now %dx%d). q quits.", m.width, m.height)
+	if m.width < 70 || m.height < 20 {
+		text := fmt.Sprintf("Resize terminal: need 70x20 (now %dx%d). q quits.", m.width, m.height)
 		return ansi.Truncate(text, max(1, m.width), "")
 	}
 	switch m.state {
@@ -446,13 +491,13 @@ func (m *model) View() string {
 }
 func (m *model) renderMenu() string {
 	body := []string{"Scan applications, choose casks, review the plan, then install.", ""}
-	labels := []string{"Scan & plan", "Review selected plan", "Migration history", "Quit"}
+	labels := []string{"🔍  Scan & plan", "📋  Review the last plan", "📜  Migration history", "👋  Quit"}
 	for i, label := range labels {
 		prefix := "  "
 		if i == m.menuCur {
 			prefix = "> "
 		}
-		body = append(body, prefix+label)
+		body = append(body, prefix+label, "")
 	}
 	if m.err != nil {
 		body = append(body, "", "Error: "+m.err.Error(), "No installations started. Fix Homebrew and scan again.")
@@ -497,47 +542,6 @@ func (m *model) renderScanning() string {
 	}
 	return m.frame("Scan", fmt.Sprintf("%s Matched %d / %d applications", m.spinner.View(), m.scanCur, m.scanTotal), body, "esc cancel | q quit")
 }
-func (m *model) renderSelection() string {
-	body := []string{"    Application / selection        Chosen cask / confidence"}
-	start, end := visibleRange(m.cursor, len(m.scanApps), m.selectionHeight())
-	for i := start; i < end; i++ {
-		body = append(body, appRow(m.scanApps[i], i == m.cursor, m.width))
-	}
-	if len(m.scanApps) == 0 {
-		body = append(body, "No applications found in /Applications.")
-	}
-	body = append(body, fmt.Sprintf("Rows %d–%d of %d", min(start+1, len(m.scanApps)), end, len(m.scanApps)), "", legend, selectionLegend)
-	if m.cursor < len(m.scanApps) {
-		a := m.scanApps[m.cursor]
-		body = append(body, "", "Focused: "+a.Name)
-		if managed(a) {
-			body = append(body, "Already managed by Homebrew. No installation needed.")
-		} else if len(a.Candidates) == 0 {
-			body = append(body, "No cask found (or search failed). Leave unselected.")
-		} else {
-			idx := 0
-			for i, c := range a.Candidates {
-				if c.Name == a.BestCask {
-					idx = i
-				}
-			}
-			c := a.Candidates[idx]
-			body = append(body, fmt.Sprintf("Cask %d/%d: %s | %s | %s", idx+1, len(a.Candidates), c.Name, c.Tap, c.Version), c.Description)
-			// Show alternatives in a viewport centered on the current choice.
-			choices := []string{}
-			lo, hi := visibleRange(idx, len(a.Candidates), 3)
-			for i := lo; i < hi; i++ {
-				label := a.Candidates[i].Name
-				if i == idx {
-					label = "[" + label + "]"
-				}
-				choices = append(choices, label)
-			}
-			body = append(body, "Choices: "+strings.Join(choices, " | "))
-		}
-	}
-	return m.frame("Select", fmt.Sprintf("%d applications | space toggles selection; ←/→ changes focused cask", len(m.scanApps)), body, "↑↓ move | ←→ cask | space select | enter review | esc back | q quit")
-}
 func (m *model) reviewLines() []string {
 	lines := []string{}
 	for i, app := range m.selectedApps {
@@ -555,36 +559,6 @@ func (m *model) renderReview() string {
 		body = append(body, "No packages selected. Esc returns to selection.")
 	}
 	return m.frame("Review installation", fmt.Sprintf("%d packages | lines %d–%d of %d | managed apps excluded", len(m.selectedApps), min(start+1, len(lines)), end, len(lines)), body, "↑↓ / PgUp/PgDn scroll | i install listed packages | esc edit | q quit")
-}
-func (m *model) renderInstalling() string {
-	body := []string{fmt.Sprintf("Completed %d / %d packages", m.installCur, m.installTotal), ""}
-	if m.installCur < len(m.installApps) {
-		body = append(body, "Current: "+m.installApps[m.installCur].Name+" → "+m.installApps[m.installCur].BestCask)
-	}
-	start := max(0, len(m.installResults)-max(1, m.listHeight()-4))
-	for _, r := range m.installResults[start:] {
-		status := "OK"
-		if !r.ok {
-			status = "FAILED"
-		}
-		body = append(body, status+"  "+r.name+"  "+r.detail)
-	}
-	if m.stopInstall {
-		body = append(body, "Stopping after the current Homebrew command finishes.")
-	}
-	return m.frame("Install", m.spinner.View()+" Homebrew is working", body, "q / ctrl+c stop after current package")
-}
-func (m *model) renderSummary() string {
-	body := []string{}
-	start, end := visibleRange(m.reviewCur, len(m.installResults), m.listHeight())
-	for _, r := range m.installResults[start:end] {
-		status := "OK"
-		if !r.ok {
-			status = "FAILED"
-		}
-		body = append(body, status+"  "+r.name+"  "+r.detail)
-	}
-	return m.frame("Results", fmt.Sprintf("Completed %d of %d planned packages", m.installCur, m.installTotal), body, "↑/↓ scroll | enter / esc home | q quit")
 }
 func (m *model) renderHistory() string {
 	entries := make([]HistoryEntry, 0, len(m.histEntries))

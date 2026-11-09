@@ -2,20 +2,20 @@ package main
 
 import "github.com/charmbracelet/lipgloss"
 
-// ── Tokyo Night inspired palette ────────────────────────────────
+// ── Velvet palette ────────────────────────────────
 // These are adaptive — look great on both light and dark terminals.
 var (
 	clrBg      = lipgloss.AdaptiveColor{Light: "#f4f4f5", Dark: "#1a1b26"}
 	clrBgLight = lipgloss.AdaptiveColor{Light: "#e4e4e7", Dark: "#24283b"}
 	clrSurface = lipgloss.AdaptiveColor{Light: "#d4d4d8", Dark: "#2f3340"}
-	clrBrand   = lipgloss.AdaptiveColor{Light: "#0891b2", Dark: "#7dcfff"}
+	clrBrand   = lipgloss.AdaptiveColor{Light: "#7149b5", Dark: "#c4a3ff"}
 	clrSuccess = lipgloss.AdaptiveColor{Light: "#16a34a", Dark: "#9ece6a"}
 	clrWarn    = lipgloss.AdaptiveColor{Light: "#ca8a04", Dark: "#e0af68"}
 	clrError   = lipgloss.AdaptiveColor{Light: "#dc2626", Dark: "#f7768e"}
 	clrText    = lipgloss.AdaptiveColor{Light: "#18181b", Dark: "#c0caf5"}
 	clrTextDim = lipgloss.AdaptiveColor{Light: "#71717a", Dark: "#565f89"}
 	clrMuted   = lipgloss.AdaptiveColor{Light: "#a1a1aa", Dark: "#3b4261"}
-	clrAccent  = lipgloss.AdaptiveColor{Light: "#7c3aed", Dark: "#bb9af7"}
+	clrAccent  = lipgloss.AdaptiveColor{Light: "#a77bc4", Dark: "#6d548e"}
 )
 
 // ── Reusable style blocks ───────────────────────────────────────

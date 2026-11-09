@@ -1,6 +1,7 @@
 name: Go checks and macOS release
 
 on:
+  workflow_dispatch:
   push:
   pull_request:
   release:
@@ -37,10 +38,8 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          for arch in arm64 amd64; do
-            CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -o dist/brew-migrator .
-            tar -czf "dist/brew-migrator-darwin-$arch.tar.gz" -C dist brew-migrator -C "$GITHUB_WORKSPACE" README.md LICENSE
-          done
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -trimpath -o dist/brew-migrator .
+          tar -czf dist/brew-migrator-darwin-arm64.tar.gz -C dist brew-migrator -C "$GITHUB_WORKSPACE" README.md LICENSE
           cd dist
           sha256sum *.tar.gz > SHA256SUMS
       - name: Attach archives to release

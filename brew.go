@@ -1,8 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/user"
@@ -32,8 +34,8 @@ type AppInfo struct {
 	BestCask   string      `json:"cask,omitempty"`
 	Score      int         `json:"score"`
 	Candidates []Candidate `json:"candidates"`
-	Selected   bool        `json:"-"`
-	Skipped    bool        `json:"-"`
+	Selected   bool        `json:"selected"`
+	Skipped    bool        `json:"skipped"`
 }
 
 // HistoryEntry is one record in the migration history.
@@ -55,7 +57,7 @@ func homeDir() string {
 }
 
 func historyPath() string {
-	return filepath.Join(homeDir(), ".brew_migrator_history")
+	return filepath.Join(stateDir(), ".brew_migrator_history")
 }
 
 // ── Brew list (installed casks cache) ──────────────────────
@@ -356,24 +358,54 @@ func getCaskCandidates(appName string) []Candidate {
 
 // ── Install ───────────────────────────────────────────────────────────────
 
-func installCask(name string) (bool, string) {
+type installOutputWriter struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+	emit   func(string)
+}
+
+func (w *installOutputWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	n, err := w.buffer.Write(p)
+	if w.emit != nil {
+		w.emit(string(p))
+	}
+	return n, err
+}
+func installCask(name string) (bool, string) { return installCaskWithOutput(name, nil) }
+func installCaskWithOutput(name string, emit func(string)) (bool, string) {
+	return installCaskWithInput(name, nil, emit)
+}
+func installCaskWithInput(name string, stdin io.Reader, emit func(string)) (bool, string) {
+	report := func(ok bool, detail string) (bool, string) {
+		if emit != nil && detail != "" {
+			emit(detail + "\n")
+		}
+		return ok, detail
+	}
 	// Read a fresh inventory immediately before installation; never use a stale
 	// scan to decide whether an app needs installing.
 	out, err := runBrew("list", "--cask")
 	if err != nil {
-		return false, "Cannot verify installed casks: " + err.Error()
+		return report(false, "Cannot verify installed casks: "+err.Error())
 	}
 	for _, token := range strings.Fields(out) {
 		if normalizeCaskName(token) == normalizeCaskName(name) || token == filepath.Base(name) {
-			return true, "Already managed by Homebrew; skipped"
+			return report(true, "Already managed by Homebrew; skipped")
 		}
 	}
 	cmd := exec.Command("brew", "install", "--cask", "--adopt", name)
-	output, err := cmd.CombinedOutput()
+	cmd.Stdin = stdin
+	output := &installOutputWriter{emit: emit}
+	cmd.Stdout = output
+	cmd.Stderr = output
+	err = cmd.Run()
 	if err != nil {
-		detail := strings.TrimSpace(string(output))
+		detail := strings.TrimSpace(output.buffer.String())
 		if detail == "" {
 			detail = err.Error()
+			return report(false, detail)
 		}
 		return false, detail
 	}

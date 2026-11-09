@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func stubBrew(t *testing.T, script string) {
@@ -115,5 +116,54 @@ func TestInstallAdoptsExistingArtifacts(t *testing.T) {
 	ok, detail := installCask("alpha")
 	if !ok || detail != "" {
 		t.Fatalf("existing artifacts must use Homebrew adoption: %v %s", ok, detail)
+	}
+}
+
+func TestInstallStreamsOutputBeforeCompletion(t *testing.T) {
+	gate := filepath.Join(t.TempDir(), "continue")
+	t.Setenv("BREW_TEST_GATE", gate)
+	stubBrew(t, `case "$1" in
+ list) exit 0 ;;
+ install)
+ printf 'FIRST_LINE\n' >&2
+ while [ ! -e "$BREW_TEST_GATE" ]; do /bin/sleep 0.01; done
+ printf 'LAST_LINE\n'
+ exit 1 ;;
+ esac`)
+	first := make(chan string, 1)
+	done := make(chan string, 1)
+	go func() {
+		_, detail := installCaskWithOutput("test-cask", func(s string) {
+			select {
+			case first <- s:
+			default:
+			}
+		})
+		done <- detail
+	}()
+	defer os.WriteFile(gate, nil, 0600)
+	select {
+	case chunk := <-first:
+		if !strings.Contains(chunk, "FIRST_LINE") {
+			t.Fatalf("unexpected first output: %q", chunk)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("output buffered until completion")
+	}
+	select {
+	case <-done:
+		t.Fatal("command finished before gate opened")
+	default:
+	}
+	if err := os.WriteFile(gate, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case detail := <-done:
+		if !strings.Contains(detail, "FIRST_LINE\n") || !strings.Contains(detail, "LAST_LINE") {
+			t.Fatalf("combined output lost: %q", detail)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("install command did not finish")
 	}
 }

@@ -106,7 +106,7 @@ func TestReviewListsEveryPackageBeforeInstall(t *testing.T) {
 }
 
 func TestViewsFitTerminalAndKeepLegend(t *testing.T) {
-	for _, size := range [][2]int{{80, 24}, {160, 50}, {48, 12}, {40, 12}, {8, 3}} {
+	for _, size := range [][2]int{{70, 20}, {72, 24}, {80, 24}, {104, 24}, {120, 30}, {160, 50}, {48, 12}, {40, 12}, {8, 3}} {
 		for _, state := range []screen{screenMenu, screenScanning, screenSelection, screenReview, screenInstalling, screenSummary, screenHistory} {
 			m := &model{state: state, width: size[0], height: size[1], ready: true}
 			for i := 0; i < 100; i++ {
@@ -161,5 +161,106 @@ func TestReviewWidenAfterScrolling(t *testing.T) {
 	view := m.View()
 	if !strings.Contains(view, "vendor/tap/package") {
 		t.Fatal("focused review row lost after resize")
+	}
+}
+
+func TestResultsPreserveWrappedMultilineErrors(t *testing.T) {
+	detail := "==> Auto-updating Homebrew...\n" + strings.Repeat("download failed because the server returned a signed URL; ", 12) + "\nFINAL_REASON_MUSE_DISABLED"
+	m := &model{state: screenSummary, ready: true, width: 80, height: 24, installResults: []installResult{{name: "Muse", detail: detail}}, installCur: 1, installTotal: 1}
+	all := ""
+	for i := 0; i < 60; i++ {
+		all += m.View()
+		m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	if !strings.Contains(all, "FINAL_REASON_MUSE_DISABLED") {
+		t.Fatal("tail of multiline error cannot be reached")
+	}
+	if !strings.Contains(all, "==> Auto-updating Homebrew...") {
+		t.Fatal("first error line lost")
+	}
+}
+
+func TestVelvetSelectionShowsSeparatedInspector(t *testing.T) {
+	m := &model{state: screenSelection, ready: true, width: 120, height: 30, scanApps: []AppInfo{{Name: "Firefox", BestCask: "firefox", Candidates: []Candidate{{Name: "firefox", Score: 98}, {Name: "firefox@esr", Score: 70}}}}}
+	view := m.View()
+	if !strings.Contains(view, "Package inspector") || !strings.Contains(view, "firefox@esr") || !strings.Contains(view, "╭") {
+		t.Fatal("Velvet split inspector and alternatives missing")
+	}
+}
+
+func TestLogScrollPausesAndResumesFollowing(t *testing.T) {
+	m := &model{state: screenInstalling, ready: true, width: 80, height: 24, followLog: true}
+	for i := 0; i < 80; i++ {
+		m.installLog.WriteString(fmt.Sprintf("output line %02d\n", i))
+	}
+	if !strings.Contains(m.View(), "output line 79") {
+		t.Fatal("live log not following latest output")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyHome})
+	before := m.View()
+	if !strings.Contains(before, "output line 00") {
+		t.Fatal("home did not show beginning")
+	}
+	m.installLog.WriteString("new output at end\n")
+	if strings.Contains(m.View(), "new output at end") {
+		t.Fatal("new output moved paused viewport")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	if !strings.Contains(m.View(), "new output at end") {
+		t.Fatal("end did not resume follow")
+	}
+	m.Update(tea.WindowSizeMsg{Width: 120, Height: 30})
+	if lipgloss.Width(m.View()) > 120 || lipgloss.Height(m.View()) > 30 {
+		t.Fatal("resized logs overflow")
+	}
+}
+
+func TestLogLongLinesHaveNoMissingCharacters(t *testing.T) {
+	m := &model{state: screenSummary, ready: true, width: 80, height: 24}
+	raw := "Error: " + strings.Repeat("signed-url-segment-", 30) + " END_OF_ERROR"
+	m.installLog.WriteString(raw)
+	wrapped := strings.Join(m.logLines(), "")
+	if wrapped != raw {
+		t.Fatal("wrapping lost output characters")
+	}
+}
+
+func TestInspectorShowsDistinguishableLongPackages(t *testing.T) {
+	prefix := "vendor/tap/" + strings.Repeat("same-prefix-", 7)
+	m := &model{state: screenSelection, ready: true, width: 104, height: 24, scanApps: []AppInfo{{Name: "App", BestCask: prefix + "stable-option", Candidates: []Candidate{{Name: prefix + "stable-option"}, {Name: prefix + "preview-option"}}}}}
+	if !strings.Contains(m.View(), "stable-option") {
+		t.Fatal("full focused package is hidden")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeyRight})
+	if !strings.Contains(m.View(), "preview-option") {
+		t.Fatal("cannot distinguish alternate package")
+	}
+}
+
+func TestVelvetWorksAt70x20(t *testing.T) {
+	m := &model{state: screenSelection, ready: true, width: 70, height: 20, scanApps: []AppInfo{{Name: "Firefox", BestCask: "firefox", Candidates: []Candidate{{Name: "firefox", Score: 98}, {Name: "firefox@esr", Score: 70}}}}}
+	view := m.View()
+	for _, text := range []string{"Firefox", "Package inspector", "firefox@esr", "Legend:", "Brew-managed", "enter review", "q quit"} {
+		if !strings.Contains(view, text) {
+			t.Errorf("70x20 missing %q", text)
+		}
+	}
+	if lipgloss.Width(view) > 70 || lipgloss.Height(view) > 20 {
+		t.Fatal("70x20 overflow")
+	}
+	m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	if !m.scanApps[0].Selected {
+		t.Fatal("70x20 input blocked")
+	}
+}
+
+func TestScanHidesVerifiedManagedApps(t *testing.T) {
+	m := &model{state: screenScanning, scanApps: []AppInfo{
+		{Name: "AppCleaner", BestCask: "appcleaner", Candidates: []Candidate{{Name: "appcleaner", Installed: true, Score: 100}}},
+		{Name: "Firefox", BestCask: "firefox", Candidates: []Candidate{{Name: "firefox", Score: 98}, {Name: "firefox-helper", Installed: true, Score: 10}}},
+	}}
+	m.handleScanDone()
+	if len(m.scanApps) != 1 || m.scanApps[0].Name != "Firefox" {
+		t.Fatal("managed apps not hidden, or unrelated installed candidate hid app")
 	}
 }
