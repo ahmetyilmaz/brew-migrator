@@ -1,24 +1,51 @@
-name: Publish to PyPI
+name: Go checks and macOS release
 
 on:
+  push:
+  pull_request:
   release:
     types: [published]
 
+permissions:
+  contents: read
+
 jobs:
-  build-n-publish:
-    name: Build and publish to PyPI
+  check:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: Set up Python
-        uses: actions/setup-python@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          python-version: "3.10"
-      - name: Install build dependencies
-        run: python -m pip install build twine
-      - name: Build binary wheel and source tarball
-        run: python -m build
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+          go-version-file: go.mod
+      - run: test -z "$(gofmt -l *.go)"
+      - run: go vet ./...
+      - run: go test -race ./...
+      - run: go build ./...
+
+  release:
+    if: github.event_name == 'release'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          password: ${{ secrets.PYPI_API_TOKEN }}
+          go-version-file: go.mod
+      - name: Build macOS archives
+        shell: bash
+        run: |
+          mkdir -p dist
+          for arch in arm64 amd64; do
+            CGO_ENABLED=0 GOOS=darwin GOARCH="$arch" go build -trimpath -o dist/brew-migrator .
+            tar -czf "dist/brew-migrator-darwin-$arch.tar.gz" -C dist brew-migrator -C "$GITHUB_WORKSPACE" README.md LICENSE
+          done
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS
+      - name: Attach archives to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: gh release upload "$RELEASE_TAG" dist/*.tar.gz dist/SHA256SUMS

@@ -33,21 +33,22 @@ const (
 
 type (
 	scanProgressMsg struct {
-		idx  int
-		info AppInfo
+		generation uint64
+		idx        int
+		info       AppInfo
 	}
-	scanDoneMsg         struct{}
-	installProgressMsg  struct {
+	scanDoneMsg        struct{ generation uint64 }
+	installProgressMsg struct {
 		idx     int
 		name    string
 		success bool
 		err     string
 	}
-	installDoneMsg      struct{}
-	historyLoadedMsg    struct {
+	installDoneMsg   struct{}
+	historyLoadedMsg struct {
 		entries map[string]HistoryEntry
 	}
-	selectionDoneMsg    struct {
+	selectionDoneMsg struct {
 		selected []*AppInfo
 	}
 )
@@ -55,13 +56,13 @@ type (
 // ── Keys ────────────────────────────────────────────────────────
 
 type keyMap struct {
-	Up     key.Binding
-	Down   key.Binding
-	Enter  key.Binding
-	Back   key.Binding
-	Quit   key.Binding
-	Space  key.Binding
-	Help   key.Binding
+	Up    key.Binding
+	Down  key.Binding
+	Enter key.Binding
+	Back  key.Binding
+	Quit  key.Binding
+	Space key.Binding
+	Help  key.Binding
 }
 
 var keys = keyMap{
@@ -77,9 +78,9 @@ var keys = keyMap{
 // ── Menu ────────────────────────────────────────────────────────
 
 type menuEntry struct {
-	title       string
-	desc        string
-	action      func(*model) tea.Cmd
+	title  string
+	desc   string
+	action func(*model) tea.Cmd
 }
 
 func buildMenu(m *model) []menuEntry {
@@ -90,18 +91,24 @@ func buildMenu(m *model) []menuEntry {
 			action: func(m *model) tea.Cmd { return m.startScan() }},
 		{title: "🚀  Install Selected Plan",
 			desc: func() string {
-				if plan > 0 { return fmt.Sprintf("(%d apps ready to install)", plan) }
+				if plan > 0 {
+					return fmt.Sprintf("(%d apps ready to install)", plan)
+				}
 				return "(no plan yet)"
 			}(),
 			action: func(m *model) tea.Cmd {
-				if len(m.selectedApps) == 0 { return nil }
+				if len(m.selectedApps) == 0 {
+					return nil
+				}
 				return m.startInstall()
 			}},
 		{title: "👀  View History", desc: fmt.Sprintf("(%d entries)", hist),
 			action: func(m *model) tea.Cmd { return m.loadHistory() }},
 		{title: "🗑  Clear History",
 			desc: func() string {
-				if hist == 0 { return "(nothing to clear)" }
+				if hist == 0 {
+					return "(nothing to clear)"
+				}
 				return "Remove all history entries"
 			}(),
 			action: func(m *model) tea.Cmd {
@@ -117,10 +124,10 @@ func buildMenu(m *model) []menuEntry {
 // ── Model ───────────────────────────────────────────────────────
 
 type model struct {
-	state   screen
-	width   int
-	height  int
-	ready   bool
+	state    screen
+	width    int
+	height   int
+	ready    bool
 	quitting bool
 
 	// Menu
@@ -128,21 +135,22 @@ type model struct {
 	entries []menuEntry
 
 	// Scan
-	scanApps    []AppInfo
-	scanCur     int
-	scanTotal   int
-	scanDone    bool
+	scanGeneration uint64
+	scanApps       []AppInfo
+	scanCur        int
+	scanTotal      int
+	scanDone       bool
 
 	// Selection  (from huh)
-	selApps     []*AppInfo
+	selApps      []*AppInfo
 	selectedApps []*AppInfo
 	// Install
-	installApps     []*AppInfo
-	installProg     progress.Model
-	installCur      int
-	installTotal    int
-	installResults  []installResult
-	installDone     bool
+	installApps    []*AppInfo
+	installProg    progress.Model
+	installCur     int
+	installTotal   int
+	installResults []installResult
+	installDone    bool
 
 	// Summary
 	sumOK   int
@@ -160,9 +168,9 @@ type model struct {
 }
 
 type installResult struct {
-	name    string
-	ok      bool
-	err     string
+	name string
+	ok   bool
+	err  string
 }
 
 func NewModel() *model {
@@ -212,20 +220,35 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 		switch m.state {
-		case screenMenu:       return m.updateMenu(msg)
-		case screenScanning:   return m.updateScanning(msg)
-		case screenSelection:  return m.updateSelection(msg)
-		case screenInstalling: return m.updateInstalling(msg)
-		case screenSummary:    return m.updateSummary(msg)
-		case screenHistory:    return m.updateHistory(msg)
+		case screenMenu:
+			return m.updateMenu(msg)
+		case screenScanning:
+			return m.updateScanning(msg)
+		case screenSelection:
+			return m.updateSelection(msg)
+		case screenInstalling:
+			return m.updateInstalling(msg)
+		case screenSummary:
+			return m.updateSummary(msg)
+		case screenHistory:
+			return m.updateHistory(msg)
 		}
 
-	case scanProgressMsg:    return m.handleScanProgress(msg)
-	case scanDoneMsg:        return m.handleScanDone()
-	case installProgressMsg: return m.handleInstallProgress(msg)
-	case installDoneMsg:     return m.handleInstallDone()
-	case historyLoadedMsg:   return m.handleHistoryLoaded(msg)
-	case selectionDoneMsg:   return m.handleSelectionDone(msg)
+	case scanProgressMsg:
+		return m.handleScanProgress(msg)
+	case scanDoneMsg:
+		if m.state != screenScanning || msg.generation != m.scanGeneration {
+			return m, nil
+		}
+		return m.handleScanDone()
+	case installProgressMsg:
+		return m.handleInstallProgress(msg)
+	case installDoneMsg:
+		return m.handleInstallDone()
+	case historyLoadedMsg:
+		return m.handleHistoryLoaded(msg)
+	case selectionDoneMsg:
+		return m.handleSelectionDone(msg)
 
 	case spinner.TickMsg:
 		var cmd tea.Cmd
@@ -245,12 +268,18 @@ func (m *model) View() string {
 		return "\n  " + m.spinner.View() + "  Loading…"
 	}
 	switch m.state {
-	case screenMenu:       return m.renderMenu()
-	case screenScanning:   return m.renderScanning()
-	case screenSelection:  return m.renderSelection()
-	case screenInstalling: return m.renderInstalling()
-	case screenSummary:    return m.renderSummary()
-	case screenHistory:    return m.renderHistory()
+	case screenMenu:
+		return m.renderMenu()
+	case screenScanning:
+		return m.renderScanning()
+	case screenSelection:
+		return m.renderSelection()
+	case screenInstalling:
+		return m.renderInstalling()
+	case screenSummary:
+		return m.renderSummary()
+	case screenHistory:
+		return m.renderHistory()
 	}
 	return "unknown state"
 }
@@ -264,10 +293,14 @@ func (m *model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
 	case key.Matches(msg, keys.Up):
 		m.menuCur--
-		if m.menuCur < 0 { m.menuCur = len(m.entries) - 1 }
+		if m.menuCur < 0 {
+			m.menuCur = len(m.entries) - 1
+		}
 	case key.Matches(msg, keys.Down):
 		m.menuCur++
-		if m.menuCur >= len(m.entries) { m.menuCur = 0 }
+		if m.menuCur >= len(m.entries) {
+			m.menuCur = 0
+		}
 	case key.Matches(msg, keys.Enter), key.Matches(msg, keys.Space):
 		if m.menuCur >= 0 && m.menuCur < len(m.entries) {
 			if cmd := m.entries[m.menuCur].action(m); cmd != nil {
@@ -330,6 +363,7 @@ func (m *model) renderMenu() string {
 // ═════════════════════════════════════════════════════════════════
 
 func (m *model) startScan() tea.Cmd {
+	m.scanGeneration++
 	m.state = screenScanning
 	m.scanDone = false
 	m.scanCur = 0
@@ -342,15 +376,18 @@ func (m *model) startScan() tea.Cmd {
 	}
 	m.scanTotal = len(apps)
 	if m.scanTotal == 0 {
-		return func() tea.Msg { return scanDoneMsg{} }
+		generation := m.scanGeneration
+		return func() tea.Msg { return scanDoneMsg{generation: generation} }
 	}
 	return m.scanNext()
 }
 
 func (m *model) scanNext() tea.Cmd {
 	if m.scanCur >= m.scanTotal {
-		return func() tea.Msg { return scanDoneMsg{} }
+		generation := m.scanGeneration
+		return func() tea.Msg { return scanDoneMsg{generation: generation} }
 	}
+	generation := m.scanGeneration
 	idx := m.scanCur
 	name := m.scanApps[idx].Name
 	return func() tea.Msg {
@@ -366,11 +403,14 @@ func (m *model) scanNext() tea.Cmd {
 			info.Score = cands[0].Score
 			info.Selected = cands[0].Score > 90
 		}
-		return scanProgressMsg{idx: idx, info: info}
+		return scanProgressMsg{generation: generation, idx: idx, info: info}
 	}
 }
 
 func (m *model) handleScanProgress(msg scanProgressMsg) (tea.Model, tea.Cmd) {
+	if m.state != screenScanning || msg.generation != m.scanGeneration || msg.idx != m.scanCur || msg.idx >= len(m.scanApps) {
+		return m, nil
+	}
 	m.scanApps[msg.idx] = msg.info
 	m.scanCur++
 	return m, m.scanNext()
@@ -393,6 +433,7 @@ func (m *model) updateScanning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.quitting = true
 		return m, tea.Quit
 	case key.Matches(msg, keys.Back):
+		m.scanGeneration++
 		m.state = screenMenu
 	}
 	return m, nil
@@ -401,7 +442,9 @@ func (m *model) updateScanning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func scanInstalledCount(apps []AppInfo) int {
 	n := 0
 	for _, a := range apps {
-		if a.Score == 100 { n++ }
+		if a.Score == 100 {
+			n++
+		}
 	}
 	return n
 }
@@ -428,7 +471,7 @@ func (m *model) renderScanning() string {
 		TableHeader.Render("Cask"),
 		TableHeader.Render("Q"),
 		TableHeader.Render("Sel")))
-	b.WriteString("  " + strings.Repeat("─", m.width-10) + "\n")
+	b.WriteString("  " + strings.Repeat("─", max(0, m.width-10)) + "\n")
 
 	showStart := max(0, m.scanCur-12)
 	showEnd := min(len(m.scanApps), showStart+25)
@@ -439,7 +482,9 @@ func (m *model) renderScanning() string {
 		cur := i == m.scanCur-1
 
 		rowStyle := TableCell
-		if cur { rowStyle = TableHighlight }
+		if cur {
+			rowStyle = TableHighlight
+		}
 
 		if !done && !cur && !app.Skipped {
 			continue
@@ -450,7 +495,9 @@ func (m *model) renderScanning() string {
 			row = fmt.Sprintf("  %s  %-28s %s", GlyphSkip, app.Name, BadgeSkipped.Render("no cask"))
 		} else if done && !app.Skipped {
 			sel := CBUnchecked.Render("○")
-			if app.Selected { sel = CBChecked.Render("●") }
+			if app.Selected {
+				sel = CBChecked.Render("●")
+			}
 			row = fmt.Sprintf("  %s  %-28s %-26s %s  %s",
 				GlyphOK, app.Name, app.BestCask, qualityEmoji(app.Score), sel)
 		} else if cur {
@@ -475,11 +522,6 @@ func (m *model) renderScanning() string {
 func (m *model) runSelectionForm() tea.Cmd {
 	return func() tea.Msg {
 		// Build options: checked if score > 90, disabled if skipped
-		type appOption struct {
-			app      *AppInfo
-			label    string
-			selected bool
-		}
 		var opts []huh.Option[*AppInfo]
 		for _, app := range m.selApps {
 			if app.Skipped {
@@ -578,7 +620,9 @@ func (m *model) installNext() tea.Cmd {
 	return func() tea.Msg {
 		ok, out := installCask(app.BestCask)
 		msg := ""
-		if !ok { msg = out }
+		if !ok {
+			msg = out
+		}
 		if ok {
 			updateHistory(app.Name, "migrated", app.BestCask)
 		} else {
@@ -598,7 +642,9 @@ func (m *model) handleInstallProgress(msg installProgressMsg) (tea.Model, tea.Cm
 func (m *model) handleInstallDone() (tea.Model, tea.Cmd) {
 	m.installDone = true
 	m.state = screenSummary
-	m.sumOK = 0; m.sumFail = 0; m.sumRows = nil
+	m.sumOK = 0
+	m.sumFail = 0
+	m.sumRows = nil
 	for _, r := range m.installResults {
 		if r.ok {
 			m.sumOK++
@@ -629,7 +675,9 @@ func (m *model) renderInstalling() string {
 	b.WriteString("\n\n")
 
 	pct := float64(0)
-	if m.installTotal > 0 { pct = float64(m.installCur) / float64(m.installTotal) }
+	if m.installTotal > 0 {
+		pct = float64(m.installCur) / float64(m.installTotal)
+	}
 
 	// Progress bar
 	bar := m.installProg.ViewAs(pct)

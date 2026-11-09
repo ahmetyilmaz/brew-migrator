@@ -32,3 +32,6 @@ Thumbs.db
 
 # Temp
 /tmp/
+
+# Generated Python packaging metadata from earlier versions
+*.egg-info/

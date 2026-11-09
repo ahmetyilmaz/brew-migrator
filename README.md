@@ -75,3 +75,23 @@ brew.go      — Homebrew ops, app scanner, fuzzy matching, scoring, history
 - [Bubbles](https://github.com/charmbracelet/bubbles) — table, spinner, progress, viewport, help components
 - [Lip Gloss](https://github.com/charmbracelet/lipgloss) — terminal styling
 - [Huh](https://github.com/charmbracelet/huh) — confirmation dialogs
+
+## Alpha verification and releases
+
+Before publishing an alpha, run:
+
+```bash
+go test -race ./...
+go vet ./...
+go build -o bin/brew-migrator .
+```
+
+Smoke-test startup and quit, scan and cancel, selection and confirmation,
+installation results, and history in a macOS terminal. Automated scan tests
+use a stub Homebrew executable and do not install applications.
+
+GitHub Actions runs Go checks on pushes and pull requests. Publishing a GitHub
+release (including a prerelease) runs the checks, then attaches unsigned macOS
+Apple Silicon and Intel archives with SHA-256 checksums. This Go version is
+not published to PyPI. Real Homebrew installation still needs a manual macOS
+smoke test before release.

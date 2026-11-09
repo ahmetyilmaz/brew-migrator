@@ -27,19 +27,19 @@ type Candidate struct {
 
 // AppInfo holds the scan result for a single app bundle.
 type AppInfo struct {
-	Name       string     `json:"name"`
-	BestCask   string     `json:"cask,omitempty"`
-	Score      int        `json:"score"`
+	Name       string      `json:"name"`
+	BestCask   string      `json:"cask,omitempty"`
+	Score      int         `json:"score"`
 	Candidates []Candidate `json:"candidates"`
-	Selected   bool       `json:"-"`
-	Skipped    bool       `json:"-"`
+	Selected   bool        `json:"-"`
+	Skipped    bool        `json:"-"`
 }
 
 // HistoryEntry is one record in the migration history.
 type HistoryEntry struct {
 	App       string `json:"app"`
-	Status    string `json:"status"`    // migrated, failed, skipped, ignored
-	Detail    string `json:"detail"`    // cask name or error message
+	Status    string `json:"status"` // migrated, failed, skipped, ignored
+	Detail    string `json:"detail"` // cask name or error message
 	Timestamp string `json:"timestamp"`
 }
 
@@ -60,8 +60,8 @@ func historyPath() string {
 // ── Brew list (installed casks cache) ──────────────────────
 
 var (
-	installedCasksMap   map[string]string // normalized → original cask name
-	installedCasksMu    sync.Mutex
+	installedCasksMap    map[string]string // normalized → original cask name
+	installedCasksMu     sync.Mutex
 	installedCasksLoaded bool
 )
 
