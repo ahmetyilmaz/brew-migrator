@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"os/user"
@@ -65,33 +66,87 @@ var (
 	installedCasksLoaded bool
 )
 
-// loadInstalledCasks fetches all installed casks once and caches them.
-// The map key is the normalized name (for lookups), the value is the
-// original cask name (for installation).
-// Subsequent calls are no-ops. Returns the map for convenience.
+// loadInstalledCasks refreshes the inventory for each scan. Names and app
+// artifact targets cover bundles whose display name differs from the cask token.
+var installedCasksErr error
+
+type caskJSON struct {
+	Token       string                       `json:"token"`
+	FullToken   string                       `json:"full_token"`
+	Names       []string                     `json:"name"`
+	Description string                       `json:"desc"`
+	Tap         string                       `json:"tap"`
+	Version     string                       `json:"version"`
+	Installed   json.RawMessage              `json:"installed"`
+	Artifacts   []map[string]json.RawMessage `json:"artifacts"`
+}
+
+type caskResponse struct {
+	Casks []caskJSON `json:"casks"`
+}
+
+func (c caskJSON) isInstalled() bool {
+	value := strings.TrimSpace(string(c.Installed))
+	return value != "" && value != "null" && value != `""` && value != "false" && value != "[]"
+}
+
 func loadInstalledCasks() map[string]string {
 	installedCasksMu.Lock()
 	defer installedCasksMu.Unlock()
-	if installedCasksLoaded {
-		return installedCasksMap
-	}
 	installedCasksMap = make(map[string]string)
-	// brew list --cask exits non-zero when no casks installed, so accept errors
-	out, err := runBrew("list", "--cask")
+	installedCasksLoaded = false
+	out, err := runBrew("info", "--json=v2", "--cask", "--installed")
+	var response caskResponse
+	if err == nil {
+		err = json.Unmarshal([]byte(out), &response)
+		if err == nil && response.Casks == nil {
+			err = fmt.Errorf("missing casks in Homebrew JSON")
+		}
+	}
 	if err != nil {
-		installedCasksLoaded = true
+		installedCasksErr = fmt.Errorf("cannot read Homebrew inventory: %w", err)
 		return installedCasksMap
 	}
-	for _, name := range strings.Fields(out) {
-		name = strings.TrimSpace(name)
-		if name == "" {
+	for _, c := range response.Casks {
+		if !c.isInstalled() {
 			continue
 		}
-		// brew list --cask returns short names like "google-chrome"
-		// Store normalized → original so we can look up the real cask name
-		installedCasksMap[normalizeCaskName(name)] = name
+		token := c.FullToken
+		if token == "" {
+			token = c.Token
+		}
+		aliases := append([]string{c.Token, token}, c.Names...)
+		for _, artifact := range c.Artifacts {
+			if raw, ok := artifact["app"]; ok {
+				var app []json.RawMessage
+				if json.Unmarshal(raw, &app) == nil && len(app) > 0 {
+					var name string
+					if json.Unmarshal(app[0], &name) == nil {
+						aliases = append(aliases, strings.TrimSuffix(filepath.Base(name), ".app"))
+					}
+					if len(app) > 1 {
+						var options struct {
+							Target string `json:"target"`
+						}
+						if json.Unmarshal(app[1], &options) == nil {
+							aliases = append(aliases, strings.TrimSuffix(filepath.Base(options.Target), ".app"))
+						}
+					}
+				}
+				var target string
+				if json.Unmarshal(artifact["target"], &target) == nil && target != "" {
+					aliases = append(aliases, strings.TrimSuffix(filepath.Base(target), ".app"))
+				}
+			}
+		}
+		for _, alias := range aliases {
+			if key := normalizeCaskName(alias); key != "" {
+				installedCasksMap[key] = token
+			}
+		}
 	}
 	installedCasksLoaded = true
+	installedCasksErr = nil
 	return installedCasksMap
 }
 
@@ -159,9 +214,9 @@ func scanApplications(folder string) []string {
 
 func runBrew(args ...string) (string, error) {
 	cmd := exec.Command("brew", args...)
-	out, err := cmd.Output()
+	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("brew %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -178,11 +233,13 @@ func searchCasks(appName string) []string {
 		if line == "" || strings.HasPrefix(line, "==>") || strings.HasPrefix(line, "#") {
 			continue
 		}
-		if seen[line] {
-			continue
+		for _, name := range strings.Fields(line) {
+			if name == "✔" || name == "✓" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			results = append(results, name)
 		}
-		seen[line] = true
-		results = append(results, line)
 	}
 	return results
 }
@@ -257,148 +314,68 @@ func abs(x int) int {
 	return x
 }
 
-// ── Brew info ─────────────────────────────────────────────────────────────
-
-type brewCaskInfo struct {
-	Name        string
-	Description string
-	Tap         string
-	Version     string
-	Installed   bool
-}
-
-func parseBrewInfo(infoText string) map[string]brewCaskInfo {
-	result := make(map[string]brewCaskInfo)
-	var current *brewCaskInfo
-	var currentName string
-
-	for _, line := range strings.Split(infoText, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.HasPrefix(line, "==> ") {
-			if current != nil && currentName != "" {
-				result[currentName] = *current
-			}
-			currentName = strings.TrimSpace(line[4:])
-			current = &brewCaskInfo{Name: currentName}
-			continue
-		}
-		if current == nil {
-			continue
-		}
-		if idx := strings.Index(line, ":"); idx >= 0 {
-			key := strings.TrimSpace(line[:idx])
-			val := strings.TrimSpace(line[idx+1:])
-			switch key {
-			case "Description":
-				current.Description = val
-			case "Tap":
-				current.Tap = val
-			case "Versions":
-				current.Version = val
-			case "Installed":
-				current.Installed = val != ""
-			}
-		}
-	}
-	if current != nil && currentName != "" {
-		result[currentName] = *current
-	}
-	return result
-}
-
+// ── Brew candidates ─────────────────────────────────────────────────────
 func getCaskCandidates(appName string) []Candidate {
-	// Fast path: check if app is already installed as a cask
 	if c := fastMatchInstalled(appName); c != nil {
 		return []Candidate{*c}
 	}
-
 	names := searchCasks(appName)
 	if len(names) == 0 {
 		return nil
 	}
-
-	// Score sort
-	type scored struct {
-		name  string
-		score int
+	out, err := runBrew(append([]string{"info", "--json=v2", "--cask"}, names...)...)
+	if err != nil {
+		return nil
 	}
-	scoredList := make([]scored, len(names))
-	for i, n := range names {
-		scoredList[i] = scored{n, scoreCandidate(appName, n)}
+	var response caskResponse
+	if json.Unmarshal([]byte(out), &response) != nil {
+		return nil
 	}
-
-	// Official-first sort
-	official := make([]scored, 0)
-	unofficial := make([]scored, 0)
-	for _, s := range scoredList {
-		if isOfficialCask(s.name) {
-			official = append(official, s)
-		} else {
-			unofficial = append(unofficial, s)
+	candidates := make([]Candidate, 0, len(response.Casks))
+	for _, c := range response.Casks {
+		name := c.FullToken
+		if name == "" {
+			name = c.Token
 		}
-	}
-	sort.Slice(official, func(i, j int) bool { return official[i].score > official[j].score })
-	sort.Slice(unofficial, func(i, j int) bool { return unofficial[i].score > unofficial[j].score })
-
-	merged := make([]scored, 0, len(names))
-	merged = append(merged, official...)
-	merged = append(merged, unofficial...)
-
-	// Fetch info (batched)
-	batchSize := 8
-	for i := 0; i < len(merged); i += batchSize {
-		end := i + batchSize
-		if end > len(merged) {
-			end = len(merged)
-		}
-		// Get info for batch
-		batchNames := make([]string, 0, end-i)
-		for _, s := range merged[i:end] {
-			batchNames = append(batchNames, s.name)
-		}
-		infoText, err := runBrew(append([]string{"info", "--cask"}, batchNames...)...)
-		if err != nil {
-			continue
-		}
-		infoMap := parseBrewInfo(infoText)
-		for j, s := range merged[i:end] {
-			if info, ok := infoMap[s.name]; ok {
-				merged[i+j] = scored{s.name, s.score} // keep score, update could be None
-				_ = info
+		score := scoreCandidate(appName, name)
+		for _, label := range append(c.Names, c.Token) {
+			if normalizeCaskName(label) == normalizeCaskName(appName) {
+				score = max(score, 95)
 			}
 		}
+		candidates = append(candidates, Candidate{Name: name, Description: c.Description, Tap: c.Tap, Version: c.Version, Installed: c.isInstalled() || isInstalledFast(name), Score: score, Official: isOfficialCask(name)})
 	}
-
-	// Build candidates
-	candidates := make([]Candidate, 0, len(merged))
-	for _, s := range merged {
-		c := Candidate{
-			Name:      s.name,
-			Score:     s.score,
-			Official:  isOfficialCask(s.name),
-			Installed: isAlreadyInstalled(s.name),
+	sort.SliceStable(candidates, func(i, j int) bool {
+		if candidates[i].Score != candidates[j].Score {
+			return candidates[i].Score > candidates[j].Score
 		}
-		candidates = append(candidates, c)
-	}
-
+		return candidates[i].Official && !candidates[j].Official
+	})
 	return candidates
 }
 
 // ── Install ───────────────────────────────────────────────────────────────
 
-// isAlreadyInstalled checks brew; falls back to in-memory cache if loaded.
-func isAlreadyInstalled(pkg string) bool {
-	if isInstalledFast(pkg) {
-		return true
-	}
-	return exec.Command("brew", "list", "--cask", pkg).Run() == nil
-}
-
 func installCask(name string) (bool, string) {
-	cmd := exec.Command("brew", "install", "--cask", name)
-	out, err := cmd.CombinedOutput()
+	// Read a fresh inventory immediately before installation; never use a stale
+	// scan to decide whether an app needs installing.
+	out, err := runBrew("list", "--cask")
 	if err != nil {
-		return false, strings.TrimSpace(string(out))
+		return false, "Cannot verify installed casks: " + err.Error()
+	}
+	for _, token := range strings.Fields(out) {
+		if normalizeCaskName(token) == normalizeCaskName(name) || token == filepath.Base(name) {
+			return true, "Already managed by Homebrew; skipped"
+		}
+	}
+	cmd := exec.Command("brew", "install", "--cask", "--adopt", name)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		detail := strings.TrimSpace(string(output))
+		if detail == "" {
+			detail = err.Error()
+		}
+		return false, detail
 	}
 	return true, ""
 }
@@ -465,7 +442,7 @@ func matchAllApps(appNames []string) []AppInfo {
 		info.Candidates = candidates
 		info.BestCask = candidates[0].Name
 		info.Score = candidates[0].Score
-		info.Selected = info.Score > 90
+		info.Selected = info.Score > 90 && !candidates[0].Installed
 		results = append(results, info)
 	}
 

@@ -4,19 +4,12 @@ import (
 	"fmt"
 	"sort"
 	"strings"
-	"time"
 
-	"github.com/charmbracelet/bubbles/help"
-	"github.com/charmbracelet/bubbles/key"
-	"github.com/charmbracelet/bubbles/progress"
 	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
-
-// ── Screen ──────────────────────────────────────────────────────
 
 type screen int
 
@@ -24,216 +17,90 @@ const (
 	screenMenu screen = iota
 	screenScanning
 	screenSelection
+	screenReview
 	screenInstalling
 	screenSummary
 	screenHistory
 )
 
-// ── Messages ────────────────────────────────────────────────────
-
-type (
-	scanProgressMsg struct {
-		generation uint64
-		idx        int
-		info       AppInfo
-	}
-	scanDoneMsg        struct{ generation uint64 }
-	installProgressMsg struct {
-		idx     int
-		name    string
-		success bool
-		err     string
-	}
-	installDoneMsg   struct{}
-	historyLoadedMsg struct {
-		entries map[string]HistoryEntry
-	}
-	selectionDoneMsg struct {
-		selected []*AppInfo
-	}
-)
-
-// ── Keys ────────────────────────────────────────────────────────
-
-type keyMap struct {
-	Up    key.Binding
-	Down  key.Binding
-	Enter key.Binding
-	Back  key.Binding
-	Quit  key.Binding
-	Space key.Binding
-	Help  key.Binding
+type scanStartedMsg struct {
+	generation uint64
+	apps       []string
+	err        error
 }
-
-var keys = keyMap{
-	Up:    key.NewBinding(key.WithKeys("up", "k"), key.WithHelp("↑/k", "up")),
-	Down:  key.NewBinding(key.WithKeys("down", "j"), key.WithHelp("↓/j", "down")),
-	Enter: key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "select")),
-	Back:  key.NewBinding(key.WithKeys("esc"), key.WithHelp("esc", "back")),
-	Quit:  key.NewBinding(key.WithKeys("ctrl+c", "q"), key.WithHelp("q", "quit")),
-	Space: key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "toggle")),
-	Help:  key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+type scanProgressMsg struct {
+	generation uint64
+	idx        int
+	info       AppInfo
 }
-
-// ── Menu ────────────────────────────────────────────────────────
-
-type menuEntry struct {
-	title  string
-	desc   string
-	action func(*model) tea.Cmd
+type scanDoneMsg struct{ generation uint64 }
+type installProgressMsg struct {
+	name    string
+	success bool
+	detail  string
 }
-
-func buildMenu(m *model) []menuEntry {
-	plan := len(m.selectedApps)
-	hist := len(m.histEntries)
-	return []menuEntry{
-		{title: "🔍  Scan & Plan", desc: "Discover apps in /Applications and match to Homebrew Casks",
-			action: func(m *model) tea.Cmd { return m.startScan() }},
-		{title: "🚀  Install Selected Plan",
-			desc: func() string {
-				if plan > 0 {
-					return fmt.Sprintf("(%d apps ready to install)", plan)
-				}
-				return "(no plan yet)"
-			}(),
-			action: func(m *model) tea.Cmd {
-				if len(m.selectedApps) == 0 {
-					return nil
-				}
-				return m.startInstall()
-			}},
-		{title: "👀  View History", desc: fmt.Sprintf("(%d entries)", hist),
-			action: func(m *model) tea.Cmd { return m.loadHistory() }},
-		{title: "🗑  Clear History",
-			desc: func() string {
-				if hist == 0 {
-					return "(nothing to clear)"
-				}
-				return "Remove all history entries"
-			}(),
-			action: func(m *model) tea.Cmd {
-				saveHistory(map[string]HistoryEntry{})
-				m.histEntries = loadHistory()
-				return nil
-			}},
-		{title: "🚪  Quit", desc: "Exit Brew Migrator",
-			action: func(m *model) tea.Cmd { return tea.Quit }},
-	}
-}
-
-// ── Model ───────────────────────────────────────────────────────
+type installDoneMsg struct{}
 
 type model struct {
-	state    screen
-	width    int
-	height   int
-	ready    bool
-	quitting bool
-
-	// Menu
-	menuCur int
-	entries []menuEntry
-
-	// Scan
-	scanGeneration uint64
-	scanApps       []AppInfo
-	scanCur        int
-	scanTotal      int
-	scanDone       bool
-
-	// Selection  (from huh)
-	selApps      []*AppInfo
-	selectedApps []*AppInfo
-	// Install
-	installApps    []*AppInfo
-	installProg    progress.Model
-	installCur     int
-	installTotal   int
-	installResults []installResult
-	installDone    bool
-
-	// Summary
-	sumOK   int
-	sumFail int
-	sumRows []string
-
-	// History
-	histEntries map[string]HistoryEntry
-	histTable   table.Model
-
-	// Shared
-	spinner spinner.Model
-	help    help.Model
-	err     error
+	state                         screen
+	width, height                 int
+	ready, quitting               bool
+	menuCur                       int
+	scanGeneration                uint64
+	scanApps                      []AppInfo
+	scanCur, scanTotal            int
+	scanDone                      bool
+	cursor, reviewCur, historyCur int
+	selectedApps                  []*AppInfo
+	installApps                   []*AppInfo
+	installCur, installTotal      int
+	installResults                []installResult
+	stopInstall                   bool
+	histEntries                   map[string]HistoryEntry
+	spinner                       spinner.Model
+	err                           error
 }
-
 type installResult struct {
-	name string
-	ok   bool
-	err  string
+	name   string
+	ok     bool
+	detail string
 }
 
 func NewModel() *model {
 	s := spinner.New()
+	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(clrBrand)
-	s.Spinner = spinner.Moon
-
-	p := progress.New(
-		progress.WithDefaultGradient(),
-		progress.WithWidth(50),
-		progress.WithoutPercentage(),
-	)
-
-	h := help.New()
-	h.Width = 80
-
-	m := &model{
-		state:       screenMenu,
-		spinner:     s,
-		help:        h,
-		installProg: p,
-		histEntries: loadHistory(),
-	}
-	m.entries = buildMenu(m)
-	return m
+	return &model{spinner: s, histEntries: loadHistory()}
 }
-
-// ── Init / Update / View ────────────────────────────────────────
-
-func (m *model) Init() tea.Cmd {
-	return tea.Batch(m.spinner.Tick, tea.EnterAltScreen)
-}
-
+func (m *model) Init() tea.Cmd { return m.spinner.Tick }
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
+		m.width = max(0, msg.Width)
+		m.height = max(0, msg.Height)
 		m.ready = true
-		m.help.Width = msg.Width
-		p := progress.New(progress.WithDefaultGradient(), progress.WithWidth(msg.Width-20), progress.WithoutPercentage())
-		m.installProg = p
-		return m, nil
-
-	case tea.KeyMsg:
-		if m.quitting {
-			return m, tea.Quit
+		if m.state == screenReview {
+			m.reviewCur = min(m.reviewCur, max(0, len(m.reviewLines())-1))
 		}
-		switch m.state {
-		case screenMenu:
-			return m.updateMenu(msg)
-		case screenScanning:
-			return m.updateScanning(msg)
-		case screenSelection:
-			return m.updateSelection(msg)
-		case screenInstalling:
-			return m.updateInstalling(msg)
-		case screenSummary:
-			return m.updateSummary(msg)
-		case screenHistory:
-			return m.updateHistory(msg)
+	case spinner.TickMsg:
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
+	case scanStartedMsg:
+		if m.state != screenScanning || msg.generation != m.scanGeneration {
+			return m, nil
 		}
-
+		if msg.err != nil {
+			m.err = msg.err
+			m.state = screenMenu
+			return m, nil
+		}
+		m.scanTotal = len(msg.apps)
+		m.scanApps = make([]AppInfo, len(msg.apps))
+		for i, name := range msg.apps {
+			m.scanApps[i] = AppInfo{Name: name, Score: -1}
+		}
+		return m, m.scanNext()
 	case scanProgressMsg:
 		return m.handleScanProgress(msg)
 	case scanDoneMsg:
@@ -242,596 +109,496 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m.handleScanDone()
 	case installProgressMsg:
-		return m.handleInstallProgress(msg)
+		m.installResults = append(m.installResults, installResult{msg.name, msg.success, msg.detail})
+		m.installCur++
+		if m.stopInstall {
+			m.state = screenSummary
+			return m, nil
+		}
+		return m, m.installNext()
 	case installDoneMsg:
-		return m.handleInstallDone()
-	case historyLoadedMsg:
-		return m.handleHistoryLoaded(msg)
-	case selectionDoneMsg:
-		return m.handleSelectionDone(msg)
-
-	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
-		return m, cmd
-
-	case progress.FrameMsg:
-		p, cmd := m.installProg.Update(msg)
-		m.installProg = p.(progress.Model)
-		return m, cmd
-	}
-	return m, nil
-}
-
-func (m *model) View() string {
-	if !m.ready {
-		return "\n  " + m.spinner.View() + "  Loading…"
-	}
-	switch m.state {
-	case screenMenu:
-		return m.renderMenu()
-	case screenScanning:
-		return m.renderScanning()
-	case screenSelection:
-		return m.renderSelection()
-	case screenInstalling:
-		return m.renderInstalling()
-	case screenSummary:
-		return m.renderSummary()
-	case screenHistory:
-		return m.renderHistory()
-	}
-	return "unknown state"
-}
-
-// ═════════════════════════════════════════════════════════════════
-// MENU
-// ═════════════════════════════════════════════════════════════════
-
-func (m *model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	m.entries = buildMenu(m)
-	switch {
-	case key.Matches(msg, keys.Up):
-		m.menuCur--
-		if m.menuCur < 0 {
-			m.menuCur = len(m.entries) - 1
+		m.state = screenSummary
+		m.histEntries = loadHistory()
+	case tea.KeyMsg:
+		k := msg.String()
+		if m.state == screenInstalling {
+			if k == "q" || k == "ctrl+c" {
+				m.stopInstall = true
+			}
+			return m, nil
 		}
-	case key.Matches(msg, keys.Down):
-		m.menuCur++
-		if m.menuCur >= len(m.entries) {
-			m.menuCur = 0
+		if k == "q" || k == "ctrl+c" {
+			m.quitting = true
+			return m, tea.Quit
 		}
-	case key.Matches(msg, keys.Enter), key.Matches(msg, keys.Space):
-		if m.menuCur >= 0 && m.menuCur < len(m.entries) {
-			if cmd := m.entries[m.menuCur].action(m); cmd != nil {
-				return m, cmd
+		if m.ready && (m.width < 72 || m.height < 24) {
+			return m, nil
+		}
+		switch m.state {
+		case screenMenu:
+			switch k {
+			case "up", "k":
+				m.menuCur = (m.menuCur + 3) % 4
+			case "down", "j":
+				m.menuCur = (m.menuCur + 1) % 4
+			case "enter":
+				m.err = nil
+				switch m.menuCur {
+				case 0:
+					return m, m.startScan()
+				case 1:
+					m.prepareReview()
+				case 2:
+					m.state = screenHistory
+					m.historyCur = 0
+					m.histEntries = loadHistory()
+				case 3:
+					m.quitting = true
+					return m, tea.Quit
+				}
+			}
+		case screenScanning:
+			if k == "esc" {
+				m.scanGeneration++
+				m.state = screenMenu
+			}
+		case screenSelection:
+			return m.updateSelection(msg)
+		case screenReview:
+			switch k {
+			case "esc":
+				m.state = screenSelection
+			case "up", "k":
+				m.reviewCur = max(0, m.reviewCur-1)
+			case "down", "j":
+				m.reviewCur = min(max(0, len(m.reviewLines())-1), m.reviewCur+1)
+			case "pgup":
+				m.reviewCur = max(0, m.reviewCur-m.listHeight())
+			case "pgdown":
+				m.reviewCur = min(max(0, len(m.reviewLines())-1), m.reviewCur+m.listHeight())
+			case "home":
+				m.reviewCur = 0
+			case "end":
+				m.reviewCur = max(0, len(m.reviewLines())-1)
+			case "i":
+				if len(m.selectedApps) > 0 {
+					return m, m.startInstall()
+				}
+			}
+		case screenSummary:
+			switch k {
+			case "up", "k":
+				m.reviewCur = max(0, m.reviewCur-1)
+			case "down", "j":
+				m.reviewCur = min(max(0, len(m.installResults)-1), m.reviewCur+1)
+			case "enter", "esc":
+				m.state = screenMenu
+			}
+		case screenHistory:
+			switch k {
+			case "up", "k":
+				m.historyCur = max(0, m.historyCur-1)
+			case "down", "j":
+				m.historyCur = min(max(0, len(m.histEntries)-1), m.historyCur+1)
+			case "pgup":
+				m.historyCur = max(0, m.historyCur-m.listHeight())
+			case "pgdown":
+				m.historyCur = min(max(0, len(m.histEntries)-1), m.historyCur+m.listHeight())
+			case "esc", "enter":
+				m.state = screenMenu
 			}
 		}
-	case key.Matches(msg, keys.Quit):
-		m.quitting = true
-		return m, tea.Quit
 	}
 	return m, nil
 }
-
-func (m *model) renderMenu() string {
-	var b strings.Builder
-
-	// ── Header ──
-	title := TitleStyle.Render("  🍺  Brew Migrator  ")
-	sub := SubtitleStyle.Render("    scan  →  match  →  select  →  install")
-	b.WriteString("\n")
-	b.WriteString(lipgloss.JoinVertical(lipgloss.Center,
-		lipgloss.NewStyle().Border(lipgloss.DoubleBorder()).BorderForeground(clrSurface).
-			Padding(0, 1).Render(title),
-		sub,
-	))
-	b.WriteString("\n\n")
-
-	// ── Items ──
-	for i, e := range m.entries {
-		active := i == m.menuCur
-		cur := "  "
-		if active {
-			cur = CursorArrow.Render("▸")
-		}
-
-		ti := MenuItemTitle.Render(e.title)
-		de := MenuItemDesc.Render(e.desc)
-		if active {
-			ti = MenuItemTitleActive.Render(e.title)
-		}
-
-		block := fmt.Sprintf("  %s %s\n      %s", cur, ti, de)
-		if active {
-			block = ActiveCardStyle.Render(block)
-		} else {
-			block = CardStyle.Render(block)
-		}
-		b.WriteString(block)
-		b.WriteString("\n")
-	}
-
-	// ── Footer ──
-	b.WriteString(HelpFooter.Render("  ↑/k ↓/j navigate  •  enter select  •  q quit"))
-
-	return DocStyle.Render(b.String())
-}
-
-// ═════════════════════════════════════════════════════════════════
-// SCANNING
-// ═════════════════════════════════════════════════════════════════
 
 func (m *model) startScan() tea.Cmd {
 	m.scanGeneration++
-	m.state = screenScanning
-	m.scanDone = false
-	m.scanCur = 0
-	loadInstalledCasks()
-
-	apps := scanApplications("/Applications")
-	m.scanApps = make([]AppInfo, len(apps))
-	for i, n := range apps {
-		m.scanApps[i] = AppInfo{Name: n, Score: -1}
-	}
-	m.scanTotal = len(apps)
-	if m.scanTotal == 0 {
-		generation := m.scanGeneration
-		return func() tea.Msg { return scanDoneMsg{generation: generation} }
-	}
-	return m.scanNext()
-}
-
-func (m *model) scanNext() tea.Cmd {
-	if m.scanCur >= m.scanTotal {
-		generation := m.scanGeneration
-		return func() tea.Msg { return scanDoneMsg{generation: generation} }
-	}
 	generation := m.scanGeneration
+	m.state = screenScanning
+	m.scanCur = 0
+	m.scanTotal = 0
+	m.scanApps = nil
+	m.selectedApps = nil
+	m.cursor = 0
+	m.scanDone = false
+	m.err = nil
+	return func() tea.Msg {
+		loadInstalledCasks()
+		installedCasksMu.Lock()
+		err := installedCasksErr
+		installedCasksMu.Unlock()
+		if err != nil {
+			return scanStartedMsg{generation: generation, err: err}
+		}
+		return scanStartedMsg{generation: generation, apps: scanApplications("/Applications")}
+	}
+}
+func (m *model) scanNext() tea.Cmd {
+	generation := m.scanGeneration
+	if m.scanCur >= m.scanTotal {
+		return func() tea.Msg { return scanDoneMsg{generation} }
+	}
 	idx := m.scanCur
 	name := m.scanApps[idx].Name
 	return func() tea.Msg {
-		time.Sleep(20 * time.Millisecond)
 		cands := getCaskCandidates(name)
-		info := AppInfo{Name: name}
-		if len(cands) == 0 {
-			info.Score = -1
-			info.Skipped = true
-		} else {
-			info.Candidates = cands
+		info := AppInfo{Name: name, Candidates: cands, Score: -1, Skipped: len(cands) == 0}
+		if len(cands) > 0 {
 			info.BestCask = cands[0].Name
 			info.Score = cands[0].Score
-			info.Selected = cands[0].Score > 90
+			info.Selected = info.Score > 90 && !cands[0].Installed
 		}
 		return scanProgressMsg{generation: generation, idx: idx, info: info}
 	}
 }
-
 func (m *model) handleScanProgress(msg scanProgressMsg) (tea.Model, tea.Cmd) {
-	if m.state != screenScanning || msg.generation != m.scanGeneration || msg.idx != m.scanCur || msg.idx >= len(m.scanApps) {
+	if m.state != screenScanning || msg.generation != m.scanGeneration || msg.idx != m.scanCur || msg.idx < 0 || msg.idx >= len(m.scanApps) {
 		return m, nil
 	}
 	m.scanApps[msg.idx] = msg.info
 	m.scanCur++
 	return m, m.scanNext()
 }
-
 func (m *model) handleScanDone() (tea.Model, tea.Cmd) {
 	m.scanDone = true
 	m.state = screenSelection
-	m.selApps = make([]*AppInfo, len(m.scanApps))
-	for i := range m.scanApps {
-		m.selApps[i] = &m.scanApps[i]
-	}
-	// Immediately show the huh selection form
-	return m, m.runSelectionForm()
-}
-
-func (m *model) updateScanning(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, keys.Quit):
-		m.quitting = true
-		return m, tea.Quit
-	case key.Matches(msg, keys.Back):
-		m.scanGeneration++
-		m.state = screenMenu
-	}
+	m.cursor = 0
 	return m, nil
 }
-
-func scanInstalledCount(apps []AppInfo) int {
-	n := 0
-	for _, a := range apps {
-		if a.Score == 100 {
-			n++
+func managed(app AppInfo) bool {
+	// A known managed bundle cannot be reinstalled through a different candidate.
+	for _, c := range app.Candidates {
+		if c.Installed && c.Score > 90 {
+			return true
 		}
 	}
-	return n
+	return false
 }
-
-func (m *model) renderScanning() string {
-	var b strings.Builder
-
-	// ── Header ──
-	hdr := TitleStyle.Render(fmt.Sprintf("  🔍  Scanning %s", m.spinner.View()))
-	b.WriteString("\n")
-	b.WriteString(hdr)
-	b.WriteString("\n")
-
-	info := fmt.Sprintf("  matched %d / %d apps  •  %d from installed casks",
-		m.scanCur, m.scanTotal, scanInstalledCount(m.scanApps[:m.scanCur]))
-	b.WriteString(SubtitleStyle.Render(info))
-	b.WriteString("\n\n")
-
-	// ── Table ──
-	// Column headers
-	b.WriteString(fmt.Sprintf("  %s  %-28s %-26s %s  %s\n",
-		TableHeader.Render("#"),
-		TableHeader.Render("App"),
-		TableHeader.Render("Cask"),
-		TableHeader.Render("Q"),
-		TableHeader.Render("Sel")))
-	b.WriteString("  " + strings.Repeat("─", max(0, m.width-10)) + "\n")
-
-	showStart := max(0, m.scanCur-12)
-	showEnd := min(len(m.scanApps), showStart+25)
-
-	for i := showStart; i < showEnd; i++ {
-		app := m.scanApps[i]
-		done := m.scanCur > i
-		cur := i == m.scanCur-1
-
-		rowStyle := TableCell
-		if cur {
-			rowStyle = TableHighlight
+func chosenInstalled(app AppInfo) bool {
+	for _, c := range app.Candidates {
+		if c.Name == app.BestCask && c.Installed {
+			return true
 		}
-
-		if !done && !cur && !app.Skipped {
-			continue
-		}
-
-		var row string
-		if app.Skipped && done {
-			row = fmt.Sprintf("  %s  %-28s %s", GlyphSkip, app.Name, BadgeSkipped.Render("no cask"))
-		} else if done && !app.Skipped {
-			sel := CBUnchecked.Render("○")
-			if app.Selected {
-				sel = CBChecked.Render("●")
-			}
-			row = fmt.Sprintf("  %s  %-28s %-26s %s  %s",
-				GlyphOK, app.Name, app.BestCask, qualityEmoji(app.Score), sel)
-		} else if cur {
-			row = fmt.Sprintf("  %s  %-28s %s",
-				GlyphWait, app.Name, SubtitleStyle.Render("matching…"))
-		} else {
-			continue
-		}
-		b.WriteString(rowStyle.Render(row) + "\n")
 	}
-
-	b.WriteString("\n")
-	b.WriteString(HelpFooter.Render("  matching in progress  •  esc to cancel  •  q quit"))
-
-	return DocStyle.Render(b.String())
+	return false
 }
-
-// ═════════════════════════════════════════════════════════════════
-// SELECTION  — uses Huh MultiSelect for polished UX
-// ═════════════════════════════════════════════════════════════════
-
-func (m *model) runSelectionForm() tea.Cmd {
-	return func() tea.Msg {
-		// Build options: checked if score > 90, disabled if skipped
-		var opts []huh.Option[*AppInfo]
-		for _, app := range m.selApps {
-			if app.Skipped {
-				// Can't select skipped apps — use Note-like description
-				continue
-			}
-			label := fmt.Sprintf("%s  %s  %s [%d]",
-				qualityEmoji(app.Score), app.Name, app.BestCask, app.Score)
-			opt := huh.NewOption[*AppInfo](label, app).Selected(app.Selected)
-			opts = append(opts, opt)
-		}
-
-		var chosen []*AppInfo
-		form := huh.NewForm(
-			huh.NewGroup(
-				huh.NewMultiSelect[*AppInfo]().
-					Title("📦  Select apps to install").
-					Description("space to toggle  •  enter to confirm  •  / to filter").
-					Filterable(true).
-					Options(opts...).
-					Value(&chosen),
-			),
-		).WithWidth(m.width - 10)
-
-		if err := form.Run(); err != nil {
-			return selectionDoneMsg{}
-		}
-		return selectionDoneMsg{selected: chosen}
-	}
-}
-
 func (m *model) updateSelection(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	// Selection is handled by Huh — we only handle navigation while
-	// the form result is being processed.
-	switch {
-	case key.Matches(msg, keys.Quit):
-		m.quitting = true
-		return m, tea.Quit
-	case key.Matches(msg, keys.Back):
+	switch msg.String() {
+	case "esc":
 		m.state = screenMenu
+	case "up", "k":
+		m.cursor = max(0, m.cursor-1)
+	case "down", "j":
+		m.cursor = min(max(0, len(m.scanApps)-1), m.cursor+1)
+	case "pgup":
+		m.cursor = max(0, m.cursor-m.selectionHeight())
+	case "pgdown":
+		m.cursor = min(max(0, len(m.scanApps)-1), m.cursor+m.selectionHeight())
+	case "home":
+		m.cursor = 0
+	case "end":
+		m.cursor = max(0, len(m.scanApps)-1)
+	case "enter":
+		m.prepareReview()
+	case " ":
+		if m.cursor < len(m.scanApps) {
+			a := &m.scanApps[m.cursor]
+			if !a.Skipped && !managed(*a) && !chosenInstalled(*a) {
+				a.Selected = !a.Selected
+			}
+		}
+	case "left", "right":
+		if m.cursor >= len(m.scanApps) {
+			break
+		}
+		a := &m.scanApps[m.cursor]
+		if len(a.Candidates) < 2 || managed(*a) {
+			break
+		}
+		idx := 0
+		for i, c := range a.Candidates {
+			if c.Name == a.BestCask {
+				idx = i
+				break
+			}
+		}
+		if msg.String() == "right" {
+			idx = (idx + 1) % len(a.Candidates)
+		} else {
+			idx = (idx + len(a.Candidates) - 1) % len(a.Candidates)
+		}
+		a.BestCask = a.Candidates[idx].Name
+		a.Score = a.Candidates[idx].Score
 	}
 	return m, nil
 }
-
-func (m *model) handleSelectionDone(msg selectionDoneMsg) (tea.Model, tea.Cmd) {
-	m.selectedApps = msg.selected
-	if len(m.selectedApps) == 0 {
-		m.state = screenMenu
-		return m, nil
+func (m *model) prepareReview() {
+	m.selectedApps = nil
+	seen := map[string]bool{}
+	for i := range m.scanApps {
+		a := &m.scanApps[i]
+		if a.Selected && !a.Skipped && !managed(*a) && !chosenInstalled(*a) && a.BestCask != "" && !seen[a.BestCask] {
+			m.selectedApps = append(m.selectedApps, a)
+			seen[a.BestCask] = true
+		}
 	}
-	// Confirm with Huh
-	var confirmed bool
-	err := huh.NewConfirm().
-		Title("🚀  Ready to install?").
-		Description(fmt.Sprintf("%d app(s) will be installed via Homebrew", len(m.selectedApps))).
-		Affirmative("Yes, install!").
-		Negative("Review again").
-		Value(&confirmed).Run()
-	if err != nil || !confirmed {
-		m.state = screenMenu
-		return m, nil
-	}
-	return m, m.startInstall()
+	m.reviewCur = 0
+	m.state = screenReview
 }
-
-func (m *model) renderSelection() string {
-	// During Huh form, we hand over control — show a brief placeholder
-	// while the form initializes.
-	return DocStyle.Render(fmt.Sprintf("\n  %s  Opening selection…", m.spinner.View()))
-}
-
-// ═════════════════════════════════════════════════════════════════
-// INSTALLING
-// ═════════════════════════════════════════════════════════════════
-
 func (m *model) startInstall() tea.Cmd {
 	m.state = screenInstalling
-	m.installApps = m.selectedApps
+	m.installApps = append([]*AppInfo(nil), m.selectedApps...)
+	m.installTotal = len(m.installApps)
 	m.installCur = 0
-	m.installTotal = len(m.selectedApps)
 	m.installResults = nil
-	m.installDone = false
-	m.installProg = progress.New(
-		progress.WithDefaultGradient(),
-		progress.WithWidth(m.width-20),
-		progress.WithoutPercentage(),
-	)
+	m.stopInstall = false
+	m.reviewCur = 0
 	return m.installNext()
 }
-
 func (m *model) installNext() tea.Cmd {
 	if m.installCur >= m.installTotal {
 		return func() tea.Msg { return installDoneMsg{} }
 	}
-	app := m.installApps[m.installCur]
+	app := *m.installApps[m.installCur]
 	return func() tea.Msg {
-		ok, out := installCask(app.BestCask)
-		msg := ""
+		ok, detail := installCask(app.BestCask)
+		status := "migrated"
+		record := app.BestCask
 		if !ok {
-			msg = out
+			status = "failed"
+			record = detail
+		} else if detail != "" {
+			status = "skipped"
+			record = detail
 		}
-		if ok {
-			updateHistory(app.Name, "migrated", app.BestCask)
-		} else {
-			updateHistory(app.Name, "failed", msg)
-		}
-		return installProgressMsg{idx: m.installCur, name: app.Name, success: ok, err: msg}
+		updateHistory(app.Name, status, record)
+		return installProgressMsg{app.Name, ok, detail}
 	}
 }
 
-func (m *model) handleInstallProgress(msg installProgressMsg) (tea.Model, tea.Cmd) {
-	m.installResults = append(m.installResults, installResult{name: msg.name, ok: msg.success, err: msg.err})
-	m.installCur++
-	pct := float64(m.installCur) / float64(m.installTotal)
-	return m, tea.Batch(m.installProg.SetPercent(pct), m.installNext())
-}
+const legend = "Legend: * strong match | ~ review match | ? uncertain | - no match"
+const selectionLegend = "[x] selected | [ ] available | [B] managed by Brew (locked)"
 
-func (m *model) handleInstallDone() (tea.Model, tea.Cmd) {
-	m.installDone = true
-	m.state = screenSummary
-	m.sumOK = 0
-	m.sumFail = 0
-	m.sumRows = nil
-	for _, r := range m.installResults {
-		if r.ok {
-			m.sumOK++
-			m.sumRows = append(m.sumRows, lipgloss.NewStyle().Foreground(clrSuccess).Render("✓  "+r.name))
-		} else {
-			m.sumFail++
-			m.sumRows = append(m.sumRows, lipgloss.NewStyle().Foreground(clrError).Render("✗  "+r.name+"  ("+r.err+")"))
-		}
-	}
-	return m, nil
-}
-
-func (m *model) updateInstalling(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func matchLabel(score int) string {
 	switch {
-	case key.Matches(msg, keys.Quit):
-		m.quitting = true
-		return m, tea.Quit
+	case score > 90:
+		return "* strong"
+	case score >= 50:
+		return "~ review"
+	case score < 0:
+		return "- no match"
+	default:
+		return "? uncertain"
 	}
-	return m, nil
 }
-
+func (m *model) listHeight() int      { return max(1, m.height-9) }
+func (m *model) selectionHeight() int { return max(1, m.height-16) }
+func visibleRange(cursor, total, rows int) (int, int) {
+	rows = max(1, rows)
+	cursor = max(0, min(cursor, total-1))
+	start := max(0, cursor-rows+1)
+	return start, min(total, start+rows)
+}
+func (m *model) frame(title, subtitle string, body []string, footer string) string {
+	width := max(1, m.width)
+	height := max(1, m.height)
+	trim := func(s string) string { return ansi.Truncate(strings.ReplaceAll(s, "\n", " "), width, "") }
+	lines := []string{TitleStyle.Render(trim("BREW MIGRATOR / " + title)), trim(subtitle), strings.Repeat("─", width)}
+	available := max(0, height-5)
+	for i := 0; i < available; i++ {
+		line := ""
+		if i < len(body) {
+			line = body[i]
+		}
+		lines = append(lines, trim(line))
+	}
+	lines = append(lines, strings.Repeat("─", width), trim(footer))
+	if len(lines) > height {
+		lines = lines[:height]
+	}
+	return strings.Join(lines, "\n")
+}
+func (m *model) View() string {
+	if !m.ready {
+		return "Loading Brew Migrator…"
+	}
+	if m.width < 72 || m.height < 24 {
+		text := fmt.Sprintf("Resize terminal: need 72x24 (now %dx%d). q quits.", m.width, m.height)
+		return ansi.Truncate(text, max(1, m.width), "")
+	}
+	switch m.state {
+	case screenScanning:
+		return m.renderScanning()
+	case screenSelection:
+		return m.renderSelection()
+	case screenReview:
+		return m.renderReview()
+	case screenInstalling:
+		return m.renderInstalling()
+	case screenSummary:
+		return m.renderSummary()
+	case screenHistory:
+		return m.renderHistory()
+	default:
+		return m.renderMenu()
+	}
+}
+func (m *model) renderMenu() string {
+	body := []string{"Scan applications, choose casks, review the plan, then install.", ""}
+	labels := []string{"Scan & plan", "Review selected plan", "Migration history", "Quit"}
+	for i, label := range labels {
+		prefix := "  "
+		if i == m.menuCur {
+			prefix = "> "
+		}
+		body = append(body, prefix+label)
+	}
+	if m.err != nil {
+		body = append(body, "", "Error: "+m.err.Error(), "No installations started. Fix Homebrew and scan again.")
+	}
+	return m.frame("Home", "Local apps → Homebrew casks", body, "↑/↓ move | enter open | q quit")
+}
+func appRow(a AppInfo, active bool, width int) string {
+	mark := "[ ]"
+	if a.Selected {
+		mark = "[x]"
+	}
+	if a.Skipped {
+		mark = "[-]"
+	}
+	if managed(a) || chosenInstalled(a) {
+		mark = "[B]"
+	}
+	pointer := " "
+	if active {
+		pointer = ">"
+	}
+	nameWidth := max(10, (width-24)/2)
+	caskWidth := max(8, width-nameWidth-22)
+	name := ansi.Truncate(a.Name, nameWidth, "…")
+	cask := a.BestCask
+	if cask == "" {
+		cask = "—"
+	}
+	cask = ansi.Truncate(cask, caskWidth, "…")
+	name += strings.Repeat(" ", max(0, nameWidth-lipgloss.Width(name)))
+	cask += strings.Repeat(" ", max(0, caskWidth-lipgloss.Width(cask)))
+	return fmt.Sprintf("%s %s %s  %s %s", pointer, mark, name, cask, matchLabel(a.Score))
+}
+func (m *model) renderScanning() string {
+	body := []string{"Reading installed casks…"}
+	if m.scanTotal > 0 {
+		body = []string{"    Application                 Chosen cask / match"}
+		start, end := visibleRange(max(0, m.scanCur-1), m.scanCur, m.listHeight()-1)
+		for i := start; i < end; i++ {
+			body = append(body, appRow(m.scanApps[i], i == m.scanCur-1, m.width))
+		}
+	}
+	return m.frame("Scan", fmt.Sprintf("%s Matched %d / %d applications", m.spinner.View(), m.scanCur, m.scanTotal), body, "esc cancel | q quit")
+}
+func (m *model) renderSelection() string {
+	body := []string{"    Application / selection        Chosen cask / confidence"}
+	start, end := visibleRange(m.cursor, len(m.scanApps), m.selectionHeight())
+	for i := start; i < end; i++ {
+		body = append(body, appRow(m.scanApps[i], i == m.cursor, m.width))
+	}
+	if len(m.scanApps) == 0 {
+		body = append(body, "No applications found in /Applications.")
+	}
+	body = append(body, fmt.Sprintf("Rows %d–%d of %d", min(start+1, len(m.scanApps)), end, len(m.scanApps)), "", legend, selectionLegend)
+	if m.cursor < len(m.scanApps) {
+		a := m.scanApps[m.cursor]
+		body = append(body, "", "Focused: "+a.Name)
+		if managed(a) {
+			body = append(body, "Already managed by Homebrew. No installation needed.")
+		} else if len(a.Candidates) == 0 {
+			body = append(body, "No cask found (or search failed). Leave unselected.")
+		} else {
+			idx := 0
+			for i, c := range a.Candidates {
+				if c.Name == a.BestCask {
+					idx = i
+				}
+			}
+			c := a.Candidates[idx]
+			body = append(body, fmt.Sprintf("Cask %d/%d: %s | %s | %s", idx+1, len(a.Candidates), c.Name, c.Tap, c.Version), c.Description)
+			// Show alternatives in a viewport centered on the current choice.
+			choices := []string{}
+			lo, hi := visibleRange(idx, len(a.Candidates), 3)
+			for i := lo; i < hi; i++ {
+				label := a.Candidates[i].Name
+				if i == idx {
+					label = "[" + label + "]"
+				}
+				choices = append(choices, label)
+			}
+			body = append(body, "Choices: "+strings.Join(choices, " | "))
+		}
+	}
+	return m.frame("Select", fmt.Sprintf("%d applications | space toggles selection; ←/→ changes focused cask", len(m.scanApps)), body, "↑↓ move | ←→ cask | space select | enter review | esc back | q quit")
+}
+func (m *model) reviewLines() []string {
+	lines := []string{}
+	for i, app := range m.selectedApps {
+		text := fmt.Sprintf("%d. %s → %s", i+1, app.Name, app.BestCask)
+		lines = append(lines, strings.Split(ansi.Wrap(text, max(1, m.width), ""), "\n")...)
+	}
+	return lines
+}
+func (m *model) renderReview() string {
+	body := []string{"Review every package below. Press i to install this exact list.", ""}
+	lines := m.reviewLines()
+	start, end := visibleRange(m.reviewCur, len(lines), m.listHeight()-2)
+	body = append(body, lines[start:end]...)
+	if len(m.selectedApps) == 0 {
+		body = append(body, "No packages selected. Esc returns to selection.")
+	}
+	return m.frame("Review installation", fmt.Sprintf("%d packages | lines %d–%d of %d | managed apps excluded", len(m.selectedApps), min(start+1, len(lines)), end, len(lines)), body, "↑↓ / PgUp/PgDn scroll | i install listed packages | esc edit | q quit")
+}
 func (m *model) renderInstalling() string {
-	var b strings.Builder
-
-	hdr := TitleStyle.Render(fmt.Sprintf("  🚀  Installing  %s", m.spinner.View()))
-	b.WriteString("\n")
-	b.WriteString(hdr)
-	b.WriteString("\n\n")
-
-	pct := float64(0)
-	if m.installTotal > 0 {
-		pct = float64(m.installCur) / float64(m.installTotal)
+	body := []string{fmt.Sprintf("Completed %d / %d packages", m.installCur, m.installTotal), ""}
+	if m.installCur < len(m.installApps) {
+		body = append(body, "Current: "+m.installApps[m.installCur].Name+" → "+m.installApps[m.installCur].BestCask)
 	}
-
-	// Progress bar
-	bar := m.installProg.ViewAs(pct)
-	pctStr := ProgressPct.Render(fmt.Sprintf("%d%%", int(pct*100)))
-	b.WriteString(fmt.Sprintf("  %s\n", bar))
-	b.WriteString(fmt.Sprintf("  %s  %s\n\n",
-		pctStr,
-		SubtitleStyle.Render(fmt.Sprintf("(%d / %d)", m.installCur, m.installTotal))))
-
-	// Current
-	if m.installCur < m.installTotal {
-		app := m.installApps[m.installCur]
-		b.WriteString(fmt.Sprintf("  %s  %s  →  %s\n\n",
-			m.spinner.View(),
-			lipgloss.NewStyle().Bold(true).Render(app.Name),
-			SubtitleStyle.Render(app.BestCask)))
-	}
-
-	// Recent results
-	start := max(0, len(m.installResults)-8)
+	start := max(0, len(m.installResults)-max(1, m.listHeight()-4))
 	for _, r := range m.installResults[start:] {
-		if r.ok {
-			b.WriteString(fmt.Sprintf("  %s  %s\n", GlyphOK, r.name))
-		} else {
-			b.WriteString(fmt.Sprintf("  %s  %s  (%s)\n", GlyphFail, r.name, r.err))
+		status := "OK"
+		if !r.ok {
+			status = "FAILED"
 		}
+		body = append(body, status+"  "+r.name+"  "+r.detail)
 	}
-
-	b.WriteString("\n")
-	b.WriteString(HelpFooter.Render("  installing  •  q to interrupt"))
-
-	return DocStyle.Render(b.String())
-}
-
-// ═════════════════════════════════════════════════════════════════
-// SUMMARY
-// ═════════════════════════════════════════════════════════════════
-
-func (m *model) updateSummary(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, keys.Quit):
-		m.quitting = true
-		return m, tea.Quit
-	case key.Matches(msg, keys.Enter), key.Matches(msg, keys.Back):
-		m.state = screenMenu
+	if m.stopInstall {
+		body = append(body, "Stopping after the current Homebrew command finishes.")
 	}
-	return m, nil
+	return m.frame("Install", m.spinner.View()+" Homebrew is working", body, "q / ctrl+c stop after current package")
 }
-
 func (m *model) renderSummary() string {
-	var b strings.Builder
-
-	b.WriteString("\n")
-	b.WriteString(TitleStyle.Render("  📊  Summary"))
-	b.WriteString("\n\n")
-
-	// Stats box
-	stats := fmt.Sprintf("\n  %s  %d succeeded\n",
-		lipgloss.NewStyle().Foreground(clrSuccess).Bold(true).Render("✓"),
-		m.sumOK)
-	if m.sumFail > 0 {
-		stats += fmt.Sprintf("  %s  %d failed\n",
-			lipgloss.NewStyle().Foreground(clrError).Bold(true).Render("✗"),
-			m.sumFail)
+	body := []string{}
+	start, end := visibleRange(m.reviewCur, len(m.installResults), m.listHeight())
+	for _, r := range m.installResults[start:end] {
+		status := "OK"
+		if !r.ok {
+			status = "FAILED"
+		}
+		body = append(body, status+"  "+r.name+"  "+r.detail)
 	}
-	stats += "\n"
-
-	for _, row := range m.sumRows {
-		stats += fmt.Sprintf("    %s\n", row)
-	}
-
-	box := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(clrSurface).
-		Padding(1, 2).
-		Width(m.width - 8).
-		Render(stats)
-
-	b.WriteString(box)
-	b.WriteString("\n")
-	b.WriteString(HelpFooter.Render("  enter  •  esc  •  q quit"))
-
-	return DocStyle.Render(b.String())
+	return m.frame("Results", fmt.Sprintf("Completed %d of %d planned packages", m.installCur, m.installTotal), body, "↑/↓ scroll | enter / esc home | q quit")
 }
-
-// ═════════════════════════════════════════════════════════════════
-// HISTORY
-// ═════════════════════════════════════════════════════════════════
-
-func (m *model) loadHistory() tea.Cmd {
-	m.state = screenHistory
-	return func() tea.Msg { return historyLoadedMsg{entries: loadHistory()} }
-}
-
-func (m *model) handleHistoryLoaded(msg historyLoadedMsg) (tea.Model, tea.Cmd) {
-	m.histEntries = msg.entries
-	m.buildHistoryTable()
-	return m, nil
-}
-
-func (m *model) buildHistoryTable() {
-	cols := []table.Column{
-		{Title: "App", Width: 28},
-		{Title: "Result", Width: 10},
-		{Title: "Detail", Width: 40},
-		{Title: "When", Width: 25},
-	}
-	rows := make([]table.Row, 0, len(m.histEntries))
-	for _, e := range m.histEntries {
-		rows = append(rows, table.Row{e.App, e.Status, e.Detail, e.Timestamp})
-	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i][3] > rows[j][3] })
-
-	t := table.New(
-		table.WithColumns(cols),
-		table.WithRows(rows),
-		table.WithFocused(false),
-		table.WithHeight(min(len(rows)+1, 20)),
-	)
-	s := table.DefaultStyles()
-	s.Header = s.Header.BorderStyle(lipgloss.NormalBorder()).BorderBottom(true).Bold(true)
-	s.Cell = s.Cell.Foreground(clrText)
-	s.Selected = s.Selected.Background(clrBgLight)
-	t.SetStyles(s)
-	m.histTable = t
-}
-
-func (m *model) updateHistory(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch {
-	case key.Matches(msg, keys.Quit):
-		m.quitting = true
-		return m, tea.Quit
-	case key.Matches(msg, keys.Back), key.Matches(msg, keys.Enter):
-		m.state = screenMenu
-	}
-	return m, nil
-}
-
 func (m *model) renderHistory() string {
-	var b strings.Builder
-
-	b.WriteString("\n")
-	hdr := TitleStyle.Render(fmt.Sprintf("  👀  Migration History  (%d entries)", len(m.histEntries)))
-	b.WriteString(hdr)
-	b.WriteString("\n\n")
-
-	if len(m.histEntries) > 0 {
-		b.WriteString(m.histTable.View())
-	} else {
-		b.WriteString(SubtitleStyle.Render("  No history yet. Run a scan and install some apps to see results here.\n"))
+	entries := make([]HistoryEntry, 0, len(m.histEntries))
+	for _, e := range m.histEntries {
+		entries = append(entries, e)
 	}
-
-	b.WriteString("\n")
-	b.WriteString(HelpFooter.Render("  esc/enter back  •  q quit"))
-
-	return DocStyle.Render(b.String())
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Timestamp > entries[j].Timestamp })
+	body := []string{}
+	start, end := visibleRange(m.historyCur, len(entries), m.listHeight())
+	for _, e := range entries[start:end] {
+		body = append(body, fmt.Sprintf("%s | %s | %s | %s", e.App, e.Status, e.Detail, e.Timestamp))
+	}
+	if len(entries) == 0 {
+		body = append(body, "No migration history yet.")
+	}
+	return m.frame("History", fmt.Sprintf("%d entries, newest first", len(entries)), body, "↑/↓ or PgUp/PgDn scroll | enter / esc home | q quit")
 }
